@@ -4076,19 +4076,47 @@ final class CanvasController {
     /// (pixel-aligned), which is where it goes natively. They stay in front of the canvas under the
     /// entered window, real windows to be used as they are; a click on one enters it where it is (its
     /// app activates, `foreignActivation`). Windows out of view are left out, put back under the
-    /// backdrop as before, and so are parked ones, which are out of view by definition.
+    /// backdrop as before, and so are parked ones, which are out of view by definition. A window that
+    /// covers the centre of the one being entered is left out too: a large neighbour just off the side
+    /// would otherwise open across the middle of it.
     private func keptOnShow(entering p: WindowProxy) -> [(proxy: WindowProxy, at: CGRect)] {
         let camera = view.camera
         guard abs(camera.zoom - 1) < 0.001 else { return [] }
         let screenRect = CGRect(origin: .zero, size: view.bounds.size)
-        var kept: [(proxy: WindowProxy, at: CGRect)] = []
-        for q in view.proxies where q !== p && q.kind == .window && q.away == nil && lastWantedIDs.contains(q.windowID) {
-            var r = camera.toScreen(q.worldRect.insetBy(dx: -q.inset, dy: -q.inset))
-            guard r.intersects(screenRect), !r.intersection(screenRect).isEmpty else { continue }
-            r.origin = CGPoint(x: (r.minX * scale).rounded() / scale, y: (r.minY * scale).rounded() / scale)
-            kept.append((q, toGlobal(r)))
+        let entered = camera.toScreen(p.worldRect.insetBy(dx: -p.inset, dy: -p.inset))
+        let stack: [(item: WindowProxy, rect: CGRect)] = view.proxies.compactMap { q in
+            guard q.kind == .window, q.away == nil, lastWantedIDs.contains(q.windowID) else { return nil }
+            return (q, camera.toScreen(q.worldRect.insetBy(dx: -q.inset, dy: -q.inset)))
         }
-        return Array(kept.suffix(LiveWindowsWire.maxKept))
+        guard let enteringIndex = stack.firstIndex(where: { $0.item === p }) else { return [] }
+        let chosen = CanvasController.neighboursKeptOnShow(stack, enteringIndex: enteringIndex, on: screenRect)
+        let kept = chosen.suffix(LiveWindowsWire.maxKept).map { q -> (proxy: WindowProxy, at: CGRect) in
+            var r = stack.first { $0.item === q }?.rect ?? .zero
+            r.origin = CGPoint(x: (r.minX * scale).rounded() / scale, y: (r.minY * scale).rounded() / scale)
+            return (q, toGlobal(r))
+        }
+        return Array(kept)
+    }
+
+    /// A neighbour stays on show when some of it is on screen and it does not cover the centre of the
+    /// window being entered.
+    static func keepsNeighbourOnShow(_ screenRect: CGRect, on screen: CGRect, clearOf centre: CGPoint) -> Bool {
+        let visible = screenRect.intersection(screen)
+        guard !visible.isNull, visible.width > 0, visible.height > 0 else { return false }
+        return !screenRect.contains(centre)
+    }
+
+    /// Stack order for the windows that stay up when `enteringIndex` is clicked into. `windows` is
+    /// bottom to top, the canvas order. The entered window is left out, and so is any window that
+    /// would cover its centre. The rest keep their order.
+    static func neighboursKeptOnShow<T>(_ windows: [(item: T, rect: CGRect)], enteringIndex: Int, on screen: CGRect) -> [T] {
+        guard windows.indices.contains(enteringIndex) else { return [] }
+        let entered = windows[enteringIndex].rect
+        let centre = CGPoint(x: entered.midX, y: entered.midY)
+        return windows.enumerated().compactMap { index, window in
+            guard index != enteringIndex, keepsNeighbourOnShow(window.rect, on: screen, clearOf: centre) else { return nil }
+            return window.item
+        }
     }
 
     // MARK: Using a window at 1:1
