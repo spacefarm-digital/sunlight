@@ -181,7 +181,7 @@ enum Settings {
 
     // MARK: Tidy
 
-    /// Settings › Arrange › Tidy › Columns: 0 for auto (see `Tidy.columns`).
+    /// Settings › Experimental › Arranging › Columns: 0 for auto (see `Tidy.columns`).
     static var tidyColumns: Int {
         get { max(0, min(6, defaults.integer(forKey: tidyColumnsKey))) }
         set { defaults.set(newValue, forKey: tidyColumnsKey) }
@@ -208,7 +208,7 @@ enum Settings {
         Tidy.Options(columns: tidyColumns, sizing: tidySizing, order: tidyOrder, spacing: tidySpacing.points(gap: tileGap))
     }
 
-    /// Settings › Windows › Opening and closing: how windows open onto the canvas and leave it
+    /// Settings › Motion › Opening and closing: how windows open onto the canvas and leave it
     /// (`WindowEffect`). Automatic picks per window from where it came from.
     static var windowEffect: WindowEffect {
         get { defaults.string(forKey: windowEffectKey).flatMap(WindowEffect.init(rawValue:)) ?? .automatic }
@@ -249,7 +249,7 @@ enum Settings {
     /// (Strip mode has no pushing or bonding; groups wait, inert, until it's off.)
     static var polarityActive: Bool { magnetism && magneticPolarity && !stripMode }
 
-    /// Settings › Windows › "Trackpad haptics": a tap under the finger as a dragged window catches a
+    /// Settings › Motion › "Trackpad haptics": a tap under the finger as a dragged window catches a
     /// guide, bumps a neighbour, repels or draws in a pole, bonds, or is prised off its group (see
     /// `Haptics`). On by default; nothing is felt without a Force Touch trackpad under the hand, or
     /// with haptic feedback off in the Mac's trackpad settings.
@@ -401,11 +401,14 @@ enum Settings {
     private static let arrangingKey = "ArrangingEnabled"
     private static let stripModeEnabledKey = "StripModeEnabled"
     private static let multipleDisplaysKey = "MultipleDisplaysEnabled"
+    private static let useScaledWindowsKey = "UseScaledWindowsEnabled"
+    private static let scaledClickZoomsKey = "UseScaledWindowsClickZooms"
+    private static let scaledHoverFocusKey = "UseScaledWindowsHoverFocus"
 
     /// The feature flag for arranging: Arrange (⌃⌥2/3/4, 2×2, 3×2, the windows of one screen) and Tidy
     /// (⌃⌥A, Tidy By, everything). Off by default: no menu items, keys, panel tile or Settings rows, and
     /// the ⌃⌥ digits and A stay with other apps. Move & Resize (one window) isn't behind it.
-    /// Settings › General › Experimental, or `defaults write com.spacefarm.sunlight ArrangingEnabled -bool YES`.
+    /// Settings › Experimental, or `defaults write com.spacefarm.sunlight ArrangingEnabled -bool YES`.
     static var arranging: Bool {
         get { defaults.bool(forKey: arrangingKey) }
         set {
@@ -416,7 +419,7 @@ enum Settings {
 
     /// The feature flag for strip mode (⌃⌥S). Off by default, the same way: no Strip Mode item, key,
     /// panel switch or Settings row, and `stripMode` reads off.
-    /// Settings › General › Experimental, or `defaults write com.spacefarm.sunlight StripModeEnabled -bool YES`.
+    /// Settings › Experimental, or `defaults write com.spacefarm.sunlight StripModeEnabled -bool YES`.
     static var stripModeEnabled: Bool {
         get { defaults.bool(forKey: stripModeEnabledKey) }
         set {
@@ -427,11 +430,50 @@ enum Settings {
 
     /// The feature flag for a canvas on every display. Off by default: one canvas, on the main display,
     /// with windows on the others shown where they are, and no Move to Display items or ⌃⌥⇧ keys.
-    /// Settings › General › Experimental, or `defaults write com.spacefarm.sunlight MultipleDisplaysEnabled -bool YES`.
+    /// Settings › Experimental, or `defaults write com.spacefarm.sunlight MultipleDisplaysEnabled -bool YES`.
     static var multipleDisplays: Bool {
         get { defaults.bool(forKey: multipleDisplaysKey) }
         set {
             defaults.set(newValue, forKey: multipleDisplaysKey)
+            NotificationCenter.default.post(name: experimentalFeaturesDidChange, object: nil)
+        }
+    }
+
+    /// The feature flag for using windows at any zoom: with live windows, the pointer over a scaled
+    /// window's content goes straight through the canvas to it, so clicks, scrolls and typing reach the
+    /// app where the window is drawn (the window server hit-tests through the scale). Off by default.
+    /// Settings › Experimental, or `defaults write com.spacefarm.sunlight UseScaledWindowsEnabled -bool YES`.
+    static var useScaledWindows: Bool {
+        get { defaults.bool(forKey: useScaledWindowsKey) }
+        set {
+            defaults.set(newValue, forKey: useScaledWindowsKey)
+            NotificationCenter.default.post(name: experimentalFeaturesDidChange, object: nil)
+        }
+    }
+
+    /// With windows used at any zoom: single and double click swapped. Off, a click focuses the window
+    /// where it is and a double-click zooms it in; on, a click zooms in and a double-click focuses.
+    static var scaledClickZooms: Bool {
+        get { defaults.bool(forKey: scaledClickZoomsKey) }
+        set { defaults.set(newValue, forKey: scaledClickZoomsKey) }
+    }
+
+    /// With windows used at any zoom: resting the pointer on a window focuses it, no click.
+    static var scaledHoverFocus: Bool {
+        get { defaults.bool(forKey: scaledHoverFocusKey) }
+        set { defaults.set(newValue, forKey: scaledHoverFocusKey) }
+    }
+
+    private static let tellSunlightKey = "TellSunlightEnabled"
+
+    /// The feature flag for Tell Sunlight: a bar on ⌃⌥Space where a request in words is carried out by
+    /// Claude with the canvas's own commands (`AgentBar`). Off by default: no key, nothing sent anywhere.
+    /// Needs an Anthropic API key, kept in the keychain (`AgentKey`).
+    /// Settings › Experimental, or `defaults write com.spacefarm.sunlight TellSunlightEnabled -bool YES`.
+    static var tellSunlight: Bool {
+        get { defaults.bool(forKey: tellSunlightKey) }
+        set {
+            defaults.set(newValue, forKey: tellSunlightKey)
             NotificationCenter.default.post(name: experimentalFeaturesDidChange, object: nil)
         }
     }
@@ -529,16 +571,18 @@ enum CaptureMethod: String, CaseIterable {
 }
 
 /// ⌘, — the settings window as the Mac's own apps have it: a toolbar of panes across the top, each a
-/// one-colour symbol over its name, and under it the chosen pane as a grouped form whose sections are
-/// headed and explained as System Settings does it. The window takes the pane's name, fits the pane's
-/// height and reopens on the pane shown last. It floats over the canvas and opens at the screen's
-/// top-right rather than the middle, so most of the canvas stays in view: every change shows on the
-/// canvas itself.
+/// one-colour symbol over its name, and under it the chosen pane as a grouped form. A pane is one
+/// idea (what's on the canvas, placing windows, how things move) and opens with a stage that acts its
+/// settings out and follows them as they change, the way System Settings › Trackpad shows the Mac's
+/// gestures; choices that are visual are tiles that draw the choice (`SettingsPictures`). The window
+/// takes the pane's name, fits the pane's height and reopens on the pane shown last. It floats over
+/// the canvas and opens at the screen's top-right rather than the middle, so most of the canvas stays
+/// in view: every change shows on the canvas itself.
 @MainActor
 final class SettingsWindowController: NSWindowController {
     /// The panes, in toolbar order.
     enum Tab: String, CaseIterable, Identifiable {
-        case general, canvas, background, windows, arrange, trackpad, shortcuts, liveWindows
+        case general, canvas, background, windows, motion, howToUse, liveWindows, experimental
 
         var id: String { rawValue }
 
@@ -548,10 +592,10 @@ final class SettingsWindowController: NSWindowController {
             case .canvas: return "Canvas"
             case .background: return "Background"
             case .windows: return "Windows"
-            case .arrange: return "Arrange"
-            case .trackpad: return "Trackpad"
-            case .shortcuts: return "Shortcuts"
+            case .motion: return "Motion"
+            case .howToUse: return "How to use"
             case .liveWindows: return "Live Windows"
+            case .experimental: return "Experimental"
             }
         }
 
@@ -562,15 +606,22 @@ final class SettingsWindowController: NSWindowController {
             case .canvas: return "rectangle.3.group"
             case .background: return "photo"
             case .windows: return "macwindow"
-            case .arrange: return "rectangle.split.2x2"
-            case .trackpad: return "hand.draw"
-            case .shortcuts: return "keyboard"
+            case .motion: return "sparkles"
+            case .howToUse: return "questionmark.circle"
             case .liveWindows: return "bolt"
+            case .experimental: return "flask"
             }
         }
 
-        /// The panes the toolbar shows: Arrange only holds Tidy, so it's there only while arranging is on.
-        @MainActor static var shown: [Tab] { allCases.filter { $0 != .arrange || Settings.arranging } }
+        /// Panes that used to exist, from an older build's remembered pane: Arrange's rows are under
+        /// Experimental now, Trackpad and Shortcuts are How to use.
+        init?(remembered: String) {
+            switch remembered {
+            case "arrange": self = .experimental
+            case "trackpad", "shortcuts": self = .howToUse
+            default: self.init(rawValue: remembered)
+            }
+        }
     }
 
     /// The window's size before a pane has measured itself. Every pane is this wide; the height then
@@ -582,10 +633,15 @@ final class SettingsWindowController: NSWindowController {
     private let model: SettingsModel
     private let tabs: SettingsTabController
 
-    /// Instructions › Placing Windows, from the ? at the bottom of the Windows pane.
-    var onPlacingGuide: (() -> Void)? {
-        get { model.onPlacingGuide }
-        set { model.onPlacingGuide = newValue }
+    /// Settings › How to use › Placing › Try: the command, on the canvas behind.
+    var onTryPlacing: ((PlacementGuide.Scope) -> Void)? {
+        get { model.onTryPlacing }
+        set { model.onTryPlacing = newValue }
+    }
+    /// Settings › How to use › Basics › Play the Tutorial.
+    var onTutorial: (() -> Void)? {
+        get { model.onTutorial }
+        set { model.onTutorial = newValue }
     }
     /// Settings › Live Windows › Reload…, and whether it has anything to do.
     var onReloadLiveWindows: (() -> Void)? {
@@ -637,7 +693,7 @@ final class SettingsWindowController: NSWindowController {
 
     init(background: BackgroundModel, onRendererChange: @escaping (Settings.Renderer) -> Void, onSetup: @escaping () -> Void) {
         // Read before the tabs exist: adding the first one selects it, which records it as the last pane.
-        let last = Settings.settingsPane.flatMap(Tab.init(rawValue:)) ?? .general
+        let last = Settings.settingsPane.flatMap(Tab.init(remembered:)) ?? .general
         let model = SettingsModel(background: background, onRendererChange: onRendererChange, onSetup: onSetup)
         self.model = model
         let tabs = SettingsTabController(model: model)
@@ -658,6 +714,7 @@ final class SettingsWindowController: NSWindowController {
         window.contentViewController = tabs
         window.setContentSize(Self.paneSize)
         model.window = window
+        model.selectTab = { [weak tabs] in tabs?.select($0) }
         tabs.select(last)
         model.refresh()
         placeAtTopRight()
@@ -679,6 +736,12 @@ final class SettingsWindowController: NSWindowController {
         showWindow(nil)
     }
 
+    /// Opens on How to use, on a chapter or where it was left.
+    func showHowToUse(_ chapter: Manual.Chapter?) {
+        if let chapter { model.howToUseChapter = chapter }
+        show(tab: .howToUse)
+    }
+
     /// The controls as the settings are now: an alert's "do this every time" can change one meanwhile.
     override func showWindow(_ sender: Any?) {
         model.refresh()
@@ -686,6 +749,13 @@ final class SettingsWindowController: NSWindowController {
         // No Dock icon: opened from the menu bar icon, Sunlight isn't the active app until it says so.
         NSApp.activate()
         super.showWindow(sender)
+        // ⌘? through the key tap comes from inside another app's window, where cooperative activation
+        // refuses Sunlight and the window, hidden on deactivate, never shows: come forward regardless.
+        if !NSApp.isActive {
+            forceSunlightFront()
+            window?.orderFrontRegardless()
+            window?.makeKey()
+        }
     }
 }
 
@@ -711,17 +781,12 @@ private final class SettingsTabController: NSTabViewController {
         super.init(nibName: nil, bundle: nil)
         tabStyle = .toolbar
         transitionOptions = []
-        for tab in Tab.shown { addTabViewItem(item(for: tab)) }
-        NotificationCenter.default.addObserver(forName: Settings.experimentalFeaturesDidChange, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.syncTabs() }
-        }
+        for tab in Tab.allCases { addTabViewItem(item(for: tab)) }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Shows a pane; Arrange while arranging is off shows Windows, where the tiling gap lives.
     func select(_ tab: Tab) {
-        let tab = Tab.shown.contains(tab) ? tab : .windows
         if let index = tabViewItems.firstIndex(where: { $0.identifier as? String == tab.rawValue }) {
             selectedTabViewItemIndex = index
         }
@@ -793,18 +858,8 @@ private final class SettingsTabController: NSTabViewController {
         frame.origin.y = window.frame.maxY - frame.height
         window.setFrame(frame, display: true, animate: window.isVisible)
     }
-
-    /// Arranging was turned on or off in General: the Arrange tab comes or goes.
-    private func syncTabs() {
-        let shown = Tab.shown.map(\.rawValue)
-        for item in tabViewItems where !shown.contains(item.identifier as? String ?? "") {
-            removeTabViewItem(item)
-        }
-        for (index, id) in shown.enumerated() where !tabViewItems.contains(where: { $0.identifier as? String == id }) {
-            if let tab = Tab(rawValue: id) { insertTabViewItem(item(for: tab), at: index) }
-        }
-    }
 }
+
 
 /// The settings window's state: what the slow checks found (the live-window probe,
 /// setup progress), and the callbacks into the app. The values themselves live in `Settings`; the
@@ -817,7 +872,12 @@ final class SettingsModel: ObservableObject {
     let background: BackgroundModel
     let onRendererChange: (Settings.Renderer) -> Void
     let onSetup: () -> Void
-    var onPlacingGuide: (() -> Void)?
+    var onTryPlacing: ((PlacementGuide.Scope) -> Void)?
+    var onTutorial: (() -> Void)?
+    /// Settings › How to use's chapter: the window's ⌘? and the ? in Settings › Windows pick one.
+    @Published var howToUseChapter: Manual.Chapter = .basics
+    /// Switches the window's pane, for the ? in Settings › Windows.
+    var selectTab: ((Tab) -> Void)?
     var onMinimapChange: ((Bool) -> Void)?
     var onDesktopFilesChange: ((Bool) -> Void)?
     var onReloadLiveWindows: (() -> Void)?
@@ -893,17 +953,17 @@ final class SettingsModel: ObservableObject {
 
     static func liveStatus(available: Bool, loadable: Bool, preview: Bool, capture: Bool) -> LiveStatus {
         if available {
-            return LiveStatus(state: .live, text: "Live windows are loaded. Windows on the canvas are the real thing, and no Screen Recording is needed.")
+            return LiveStatus(state: .live, text: "Live windows are on. No Screen Recording needed.")
         }
         if loadable {
             return preview
-                ? LiveStatus(state: .preview, text: "Preview mode: windows are pictures until live windows are set up. Set Up Sunlight walks through it.")
-                : LiveStatus(state: .loadable, text: "Live windows aren't loaded in the Dock yet. Set Up Sunlight loads them, asking for your password the first time.")
+                ? LiveStatus(state: .preview, text: "Preview mode: windows are pictures until setup is done.")
+                : LiveStatus(state: .loadable, text: "Live windows aren't loaded yet. Set Up Sunlight loads them.")
         }
-        let missing = "the app's live-window helper is missing"
-        if capture { return LiveStatus(state: .unavailable, text: "Live windows unavailable (\(missing)); windows are captured as pictures.") }
-        if preview { return LiveStatus(state: .unavailable, text: "Preview mode: windows are pictures until live windows are set up (\(missing)).") }
-        return LiveStatus(state: .unavailable, text: "Live windows unavailable (\(missing)); windows show as still pictures.")
+        let missing = "the helper is missing"
+        if capture { return LiveStatus(state: .unavailable, text: "Live windows unavailable: \(missing). Using screen capture.") }
+        if preview { return LiveStatus(state: .unavailable, text: "Preview mode: \(missing).") }
+        return LiveStatus(state: .unavailable, text: "Live windows unavailable: \(missing).")
     }
 
     private func readSetupLog() {
@@ -959,6 +1019,7 @@ final class SettingsModel: ObservableObject {
     }
 }
 
+
 // MARK: - The panes
 
 /// One pane, by its tab, at the window's width; the window's height follows the pane's content.
@@ -986,10 +1047,10 @@ private struct SettingsPane: View {
         case .canvas: CanvasPane(model: model)
         case .background: BackgroundSettingsView(model: model.background, presenter: presenter)
         case .windows: WindowsPane(model: model)
-        case .arrange: ArrangePane(model: model)
-        case .trackpad: TrackpadPane()
-        case .shortcuts: ShortcutsPane()
+        case .motion: MotionPane(model: model)
+        case .howToUse: HowToUsePane(model: model)
         case .liveWindows: LiveWindowsPane(model: model)
+        case .experimental: ExperimentalPane(model: model)
         }
     }
 }
@@ -1058,75 +1119,89 @@ struct InfoButton: View {
     }
 }
 
+/// A small coloured pill with a dot: a state at a glance, beside a title.
+struct StatusPill: View {
+    let text: String
+    let colour: Color
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(colour).frame(width: 6, height: 6)
+            Text(text).font(.caption).fontWeight(.semibold)
+        }
+        .foregroundStyle(colour)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(colour.opacity(0.14)))
+        .accessibilityElement(children: .combine)
+    }
+}
+
 // MARK: - General
 
-/// Taking over the Mac, what comes back at launch, layouts, updates, and the experiments.
+/// Sunlight itself: whether it's taken the Mac over, what comes back at launch, layouts, updates, and
+/// the way out.
 private struct GeneralPane: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
         Form {
             Section {
-                Toggle("Take over the Mac", isOn: model.bind({ model.isTakenOver?() == true }, { on in
-                    if on { model.onTakeOver?() } else { model.onRelease?() }
-                }))
-            } header: {
-                SectionHeader(title: "The Mac",
-                              detail: "Sunlight takes the place of the Dock, ⌘Tab, Mission Control and Show Desktop, and opens at login. Turning it off puts them back and quits Sunlight.")
+                HStack(spacing: 14) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 56, height: 56)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 8) {
+                            Text(versionTitle).font(.headline)
+                            StatusPill(text: takenOver ? "Taking over the Mac" : "Not taking over", colour: takenOver ? .green : .secondary)
+                        }
+                        Text("Replaces the Dock, ⌘Tab and Mission Control. Off puts them back.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    Toggle("Take over the Mac", isOn: model.bind({ model.isTakenOver?() == true }, { on in
+                        if on { model.onTakeOver?() } else { model.onRelease?() }
+                    }))
+                    .labelsHidden()
+                }
+                .padding(.vertical, 4)
             }
             Section {
                 Toggle(isOn: model.bind({ Settings.rememberCanvas }, { Settings.rememberCanvas = $0 })) {
                     RowLabel(title: "Remember the canvas",
-                             subtitle: "Where every window sits, the zoom and the background come back next launch.")
+                             subtitle: "Windows, zoom and background come back next launch.")
+                }
+                Picker(selection: model.bind({ Settings.otherWindows }, { Settings.otherWindows = $0 })) {
+                    ForEach(Settings.OtherWindows.allCases, id: \.self) { Text($0.title) }
+                } label: {
+                    RowLabel(title: "Windows not in a layout",
+                             subtitle: "What happens to windows a layout leaves out.",
+                             info: "Restoring a layout reopens what’s missing. Windows it leaves out can stay, move aside or close.")
                 }
             } header: {
                 SectionHeader(title: "Between launches")
-            }
-            Section {
-                Picker("Windows not in the layout", selection: model.bind({ Settings.otherWindows }, { Settings.otherWindows = $0 })) {
-                    ForEach(Settings.OtherWindows.allCases, id: \.self) { Text($0.title) }
-                }
-            } header: {
-                SectionHeader(title: "Layouts",
-                              detail: "A layout records each window’s app, document and position, and restoring it reopens what’s missing. This is what it does with the windows on the canvas it doesn’t mention.")
             }
             if model.onCheckForUpdates != nil {
                 Section {
                     LabeledContent {
                         Button("Check Now…") { model.onCheckForUpdates?() }
                     } label: {
-                        RowLabel(title: "Check for updates", subtitle: versionLine)
+                        RowLabel(title: "Check for updates", subtitle: "Sunlight asks before installing.")
                     }
                 } header: {
                     SectionHeader(title: "Updates")
                 }
             }
             Section {
-                Toggle(isOn: model.bind({ Settings.arranging }, { Settings.arranging = $0 })) {
-                    RowLabel(title: "Arranging",
-                             subtitle: "Arrange (⌃⌥2, 3, 4) and Tidy (⌃⌥A).",
-                             info: "Arrange (⌃⌥2, 3, 4 and the grids) puts the windows of one screen in columns; Tidy (⌃⌥A) lays out every window. Turning it on adds them to the menus, the menu bar panel and an Arrange pane here.")
-                }
-                Toggle(isOn: model.bind({ Settings.stripModeEnabled }, { model.setStripModeEnabled($0) })) {
-                    RowLabel(title: "Strip mode",
-                             subtitle: "Every app on one endless strip, on and off with ⌃⌥S.",
-                             info: "Every app on one endless horizontal strip, turned on and off with ⌃⌥S. Turning it on adds it to the menus, the menu bar panel and Settings › Canvas.")
-                }
-                Toggle(isOn: model.bind({ Settings.multipleDisplays }, { Settings.multipleDisplays = $0 })) {
-                    RowLabel(title: "Multiple displays",
-                             subtitle: "A canvas on every display, not just the main one.",
-                             info: "Each display gets a canvas of its own, and windows move between them with ⌃⌥⇧ → ←. Live windows on the other displays need the Dock add-on sunlight-13. Off, there’s one canvas on the main display.")
-                }
-            } header: {
-                SectionHeader(title: "Experimental",
-                              detail: "Unfinished features, off until they’re ready. Turning one off puts its keys back for other apps.")
-            }
-            Section {
                 LabeledContent {
                     Button("Uninstall…") { model.onUninstall?() }
                 } label: {
                     RowLabel(title: "Uninstall Sunlight",
-                             subtitle: "Walks the install backwards, step by step, and moves Sunlight to the Trash.")
+                             subtitle: "Undoes setup and moves Sunlight to the Trash.")
                 }
             }
         }
@@ -1134,76 +1209,706 @@ private struct GeneralPane: View {
         .toggleStyle(.switch)
     }
 
-    private var versionLine: String {
+    private var takenOver: Bool { model.isTakenOver?() == true }
+
+    private var versionTitle: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
-        let checks = "checks on its own and asks before installing."
-        guard let version, !version.isEmpty else { return "Sunlight " + checks }
-        return "This is Sunlight \(version). It " + checks
+        guard let version, !version.isEmpty else { return "Sunlight" }
+        return "Sunlight \(version)"
     }
 }
 
 // MARK: - Canvas
 
-/// Moving around the canvas, and what sits on it.
+/// What's on the canvas besides the windows: the minimap, the desktop's files, the ⌘Tab strip. The
+/// stage shows the canvas as these have it.
 private struct CanvasPane: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
         Form {
             Section {
-                Toggle(isOn: model.bind({ Settings.panInertia }, { Settings.panInertia = $0 })) {
-                    RowLabel(title: "Inertia when panning",
-                             subtitle: "A four-finger or scroll pan keeps gliding for a moment after the fingers lift.")
+                SettingsStage(caption: caption) {
+                    CanvasStage(minimap: Settings.showMinimap, files: Settings.showDesktopFloor,
+                                strip: Settings.switcherOn, edge: Settings.switcherEdge)
                 }
-                Toggle(isOn: model.bind({ Settings.zoomInertia }, { Settings.zoomInertia = $0 })) {
-                    RowLabel(title: "Inertia when zooming",
-                             subtitle: "A pinch tails off for a moment after the fingers lift.")
-                }
-                Toggle(isOn: model.bind({ Settings.snapToWindows }, { Settings.snapToWindows = $0 })) {
-                    RowLabel(title: "Snap to full screen windows",
-                             subtitle: "Stopping almost exactly on a screen-sized window nudges the canvas onto it and enters it.")
-                }
-            } header: {
-                SectionHeader(title: "Moving around",
-                              detail: "Inertia is off while Reduce Motion is on in System Settings › Accessibility.")
             }
             Section {
-                if Settings.stripModeEnabled {
-                    Toggle(isOn: model.bind({ Settings.stripMode }, { on in
-                        NotificationCenter.default.post(name: Settings.stripModeRequested, object: NSNumber(value: on))
-                    })) {
-                        RowLabel(title: "Strip mode",
-                                 subtitle: "Every app on one endless horizontal strip. ⌃⌥S, or Window › Strip Mode.",
-                                 info: "Each app’s windows stack in a column: the app used last on the left, each one before it further right. The ⌃⌥ arrows step along the strip.")
-                    }
-                }
                 Toggle(isOn: model.bind({ Settings.showMinimap }, { model.setMinimap($0) })) {
                     RowLabel(title: "Minimap",
-                             subtitle: "A map of the whole canvas in the bottom-right corner. Click a window on it to fly there.")
+                             subtitle: "A map of the canvas in the corner.")
                 }
+                Toggle(isOn: model.bind({ Settings.showDesktopFloor }, { model.setDesktopFiles($0) })) {
+                    RowLabel(title: "Desktop files",
+                             subtitle: "Your desktop files, under the windows.")
+                }
+                DesktopMapRow(model: model)
             } header: {
                 SectionHeader(title: "On the canvas")
             }
             Section {
-                Toggle("Desktop files", isOn: model.bind({ Settings.showDesktopFloor }, { model.setDesktopFiles($0) }))
-                DesktopMapRow(model: model)
-            } header: {
-                SectionHeader(title: "Desktop",
-                              detail: "Finder’s desktop lies under the windows as the canvas floor: open, drag and select files as on the desktop. Drag a dot outside the windows to put its block beside them, or inside to put it under them.")
-            }
-            Section {
-                Toggle("Show the ⌘Tab strip", isOn: model.bind({ Settings.switcherOn }, { Settings.switcherOn = $0 }))
-                Picker("Edge", selection: model.bind({ Settings.switcherEdge }, { Settings.switcherEdge = $0 })) {
-                    ForEach(SwitcherEdge.allCases, id: \.self) { Text($0.title) }
+                Toggle(isOn: model.bind({ Settings.switcherOn }, { Settings.switcherOn = $0 })) {
+                    RowLabel(title: "Show the ⌘Tab strip",
+                             subtitle: "⌘Tab still works when it’s off.")
                 }
-                .pickerStyle(.segmented)
+                TileRow {
+                    ForEach(SwitcherEdge.allCases, id: \.self) { edge in
+                        PictureTile(title: edge.title, selected: Settings.switcherEdge == edge) {
+                            model.objectWillChange.send()
+                            Settings.switcherEdge = edge
+                        } picture: {
+                            EdgePicture(edge: edge)
+                        }
+                    }
+                }
+                .disabled(!Settings.switcherOn)
+                .accessibilityLabel("Edge of the screen the strip hugs")
             } header: {
                 SectionHeader(title: "⌘ Tab",
-                              detail: "The strip of app icons over the canvas while ⌘ is held, and the edge of the screen it hugs. Off, the strip is hidden and ⌘Tab still moves between windows on the canvas.")
+                              detail: "The app strip shown while you hold ⌘.")
             }
         }
         .formStyle(.grouped)
         .toggleStyle(.switch)
+    }
+
+    private var caption: String {
+        var parts: [String] = []
+        parts.append(Settings.switcherOn ? "⌘Tab strip on the \(Settings.switcherEdge.title.lowercased())." : "No ⌘Tab strip.")
+        parts.append(Settings.showMinimap ? "Minimap on." : "No minimap.")
+        if Settings.showDesktopFloor { parts.append("Desktop files on.") }
+        return parts.joined(separator: " ")
+    }
+}
+
+// MARK: - Windows
+
+/// Placing windows: what happens under the hand while one is dragged (guides, the grid, magnetism)
+/// and the gap tiling leaves. The stage drags a window beside its neighbour with these on.
+private struct WindowsPane: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        Form {
+            Section {
+                SettingsStage(caption: caption) { DragStage(placing: placing) }
+            }
+            Section {
+                Toggle(isOn: model.bind({ Settings.alignmentGuides }, { Settings.alignmentGuides = $0 })) {
+                    RowLabel(title: "Alignment guides",
+                             subtitle: "Edges line up with nearby windows.")
+                }
+                Toggle(isOn: model.bind({ Settings.snapToGrid }, { Settings.snapToGrid = $0 })) {
+                    RowLabel(title: "Snap to grid")
+                }
+                Picker(selection: model.bind({ Settings.gridSize }, { Settings.gridSize = $0 })) {
+                    ForEach(Settings.gridSizes, id: \.self) { Text("\(Int($0)) pt") }
+                } label: {
+                    RowLabel(title: "Grid step",
+                             subtitle: "Also the gap between aligned windows.")
+                }
+                .pickerStyle(.segmented)
+                .disabled(!Settings.snapToGrid && !Settings.alignmentGuides)
+            } header: {
+                SectionHeader(title: "Dragging",
+                              detail: "Hold ⌘ while dragging to place freely.")
+            }
+            Section {
+                Toggle("Windows push each other", isOn: model.bind({ Settings.magnetism }, { model.setMagnetism($0) }))
+                LabeledContent {
+                    HStack(spacing: 8) {
+                        Text("Gentle").font(.caption).foregroundStyle(.secondary)
+                        Slider(value: model.bind({ Double(Settings.magnetismStrength) }, { Settings.magnetismStrength = CGFloat($0) }), in: 0...1)
+                            .frame(width: 150)
+                        Text("Firm").font(.caption).foregroundStyle(.secondary)
+                    }
+                } label: {
+                    RowLabel(title: "Strength",
+                             subtitle: "Firm keeps a gap and pushes whole rows.")
+                }
+                .disabled(!Settings.magnetism)
+                Toggle(isOn: model.bind({ Settings.magneticPolarity }, { model.setPolarity($0) })) {
+                    RowLabel(title: "Magnetic polarity",
+                             subtitle: "Opposite poles stick together. Like poles repel.",
+                             info: "Every window is ⊕ or ⊖. Click its pole or press P to flip it.")
+                }
+                .disabled(!Settings.magnetism)
+            } header: {
+                SectionHeader(title: "Magnetism",
+                              detail: "Windows move aside instead of overlapping.")
+            }
+            Section {
+                TileRow {
+                    ForEach(Settings.tileGaps, id: \.self) { gap in
+                        PictureTile(title: gap == 0 ? "None" : "\(Int(gap)) pt", selected: nearestGap == gap) {
+                            model.objectWillChange.send()
+                            Settings.tileGap = gap
+                        } picture: {
+                            GapPicture(gap: gap)
+                        }
+                    }
+                }
+                .accessibilityLabel("Gap")
+            } header: {
+                SectionHeader(title: "Tiling",
+                              detail: tilingDetail)
+            } footer: {
+                HStack {
+                    Spacer()
+                    HelpLink {
+                        model.howToUseChapter = .placing
+                        model.selectTab?(.howToUse)
+                    }
+                        .help("How placing works")
+                }
+                .padding(.top, 8)
+            }
+        }
+        .formStyle(.grouped)
+        .toggleStyle(.switch)
+    }
+
+    private var placing: SettingsPictures.Placing {
+        SettingsPictures.Placing(guides: Settings.alignmentGuides, grid: Settings.snapToGrid, step: Settings.gridSize,
+                                 magnetism: Settings.magnetism, strength: Settings.magnetismStrength, polarity: Settings.magneticPolarity)
+    }
+
+    /// What the stage is showing, as the settings have it.
+    static func caption(for s: SettingsPictures.Placing) -> String {
+        var parts: [String] = []
+        if s.guides { parts.append("edges line up") }
+        if s.grid { parts.append("it snaps to a \(Int(s.step)) pt grid") }
+        if s.magnetism {
+            parts.append(s.strength > 0.5 ? "it pushes firmly" : "it pushes gently")
+            if s.polarity { parts[parts.count - 1] += " by pole" }
+        }
+        guard !parts.isEmpty else { return "Nothing catches: a window lands where you drop it." }
+        let line = parts.joined(separator: ", ")
+        return line.prefix(1).uppercased() + line.dropFirst() + "."
+    }
+
+    private var caption: String { Self.caption(for: placing) }
+
+    private var tilingDetail: String {
+        "⌃⌥ arrows tile halves, U I J K quarters, D F G thirds, ⏎ full screen."
+    }
+
+    /// The nearest of the gaps on offer: one set with `defaults write` needn't be among them.
+    private var nearestGap: CGFloat {
+        let gap = Settings.tileGap
+        return Settings.tileGaps.min(by: { abs($0 - gap) < abs($1 - gap) }) ?? 8
+    }
+}
+
+// MARK: - Motion
+
+/// How things move: windows opening and closing, the camera's inertia, and what the trackpad says
+/// back. The stage plays the chosen effect.
+private struct MotionPane: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        Form {
+            Section {
+                SettingsStage(caption: Self.effectLine(Settings.windowEffect)) { EffectStage(effect: Settings.windowEffect) }
+            }
+            Section {
+                TileRow {
+                    ForEach(Array(WindowEffect.allCases.enumerated()), id: \.element) { i, effect in
+                        PictureTile(title: effect.title, selected: Settings.windowEffect == effect, width: 84) {
+                            model.objectWillChange.send()
+                            Settings.windowEffect = effect
+                        } picture: {
+                            EffectStage(effect: effect, tile: true, phase: Double(i) * 0.45)
+                        }
+                    }
+                }
+                .accessibilityLabel("Effect")
+            } header: {
+                SectionHeader(title: "Opening and closing",
+                              detail: "Reduce Motion turns every effect into a fade.")
+            }
+            Section {
+                Toggle(isOn: model.bind({ Settings.panInertia }, { Settings.panInertia = $0 })) {
+                    RowLabel(title: "Inertia when panning",
+                             subtitle: "Pans glide on after you let go.")
+                }
+                Toggle(isOn: model.bind({ Settings.zoomInertia }, { Settings.zoomInertia = $0 })) {
+                    RowLabel(title: "Inertia when zooming",
+                             subtitle: "Zooms ease out after you let go.")
+                }
+                Toggle(isOn: model.bind({ Settings.snapToWindows }, { Settings.snapToWindows = $0 })) {
+                    RowLabel(title: "Snap to full-screen windows",
+                             subtitle: "Stop near one and you’re in it.")
+                }
+            } header: {
+                SectionHeader(title: "The camera",
+                              detail: "Reduce Motion turns inertia off.")
+            }
+            Section {
+                Toggle(isOn: model.bind({ Settings.haptics }, { Settings.haptics = $0 })) {
+                    RowLabel(title: "Trackpad haptics",
+                             subtitle: "Feel guides catch and windows meet.",
+                             info: "Needs a Force Touch trackpad with haptics on in System Settings › Trackpad.")
+                }
+            } header: {
+                SectionHeader(title: "Feedback")
+            }
+        }
+        .formStyle(.grouped)
+        .toggleStyle(.switch)
+    }
+
+    /// The stage's caption: the effect in a line.
+    static func effectLine(_ effect: WindowEffect) -> String {
+        switch effect {
+        case .automatic: return "Automatic: picks the effect that fits each window."
+        case .sunrise: return "Sunrise: rises into place as it brightens."
+        case .unfold: return "Unfold: rolls down from its top edge."
+        case .bloom: return "Bloom: springs up with a ring of light."
+        case .dissolve: return "Dissolve: fades in and out."
+        case .none: return "None: no animation."
+        }
+    }
+}
+
+// MARK: - How to use
+
+/// Everything Sunlight teaches, a chapter at a time (`Manual.Chapter`): the basics and the tutorial,
+/// the gesture loops (`TrackpadPane`), placing windows acted out (`PlacingChapter`) and every key
+/// (`ShortcutsPane`). A reference, not settings, apart from the See everything gesture.
+private struct HowToUsePane: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        Group {
+            switch model.howToUseChapter {
+            case .basics: BasicsChapter { model.onTutorial?() }
+            case .gestures: TrackpadPane()
+            case .placing: PlacingChapter(onTry: { model.onTryPlacing?($0) }, arranging: Settings.arranging)
+            case .shortcuts: ShortcutsPane()
+            }
+        }
+        // Over the top of the list, as an inset, so the form's measured height counts it and the window fits.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Picker("Chapter", selection: $model.howToUseChapter) {
+                ForEach(Manual.Chapter.allCases) { Text($0.short).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(.bar)
+        }
+    }
+}
+
+// MARK: - Shortcuts
+
+/// What the canvas does with the pointer, trackpad and keys (`ShortcutReference`): a list to read, not
+/// to change. Settings › How to use › Keyboard.
+struct ShortcutsPane: View {
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(ShortcutReference.canvasRows, id: \.title) { row in
+                    LabeledContent(row.title) { Text(row.keys).foregroundStyle(.secondary) }
+                }
+            } header: {
+                SectionHeader(title: "Canvas")
+            }
+            Section {
+                ForEach(ShortcutReference.commandRows, id: \.title) { row in
+                    LabeledContent(row.title) { Text(row.keys).foregroundStyle(.secondary) }
+                }
+            } header: {
+                SectionHeader(title: "Sunlight",
+                              detail: "⌃⌥ keys work inside windows too.")
+            }
+        }
+        .formStyle(.grouped)
+        .toggleStyle(.switch)
+    }
+}
+
+// MARK: - Live windows
+
+/// How windows reach the canvas: the real ones through the Dock add-on, or pictures of them; how far
+/// setup has come, drawn as the three stages of the way with a mark on each.
+private struct LiveWindowsPane: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        Form {
+            Section {
+                VStack(spacing: 12) {
+                    HStack(alignment: .top, spacing: 0) {
+                        PipelineStage(title: "Your windows", line: "the real ones", mark: .done) {
+                            MiniWindowsPicture(windows: [CGRect(x: 10, y: 10, width: 34, height: 26), CGRect(x: 40, y: 26, width: 34, height: 26)])
+                        }
+                        PipelineArrow()
+                        PipelineStage(title: "Dock add-on", line: addOnLine, mark: addOnMark) {
+                            DockPicture()
+                        }
+                        PipelineArrow()
+                        PipelineStage(title: "The canvas", line: canvasLine, mark: canvasMark) {
+                            MiniWindowsPicture(windows: [CGRect(x: 8, y: 8, width: 22, height: 16), CGRect(x: 34, y: 14, width: 26, height: 18),
+                                                         CGRect(x: 14, y: 34, width: 20, height: 16), CGRect(x: 52, y: 36, width: 26, height: 18)],
+                                               captured: Settings.renderer == .capture)
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        StatusPill(text: statusTitle, colour: statusColor)
+                        Text(model.liveStatus.text)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .padding(.vertical, 6)
+                .accessibilityElement(children: .combine)
+            }
+            Section {
+                TileRow {
+                    PictureTile(title: "Live windows", selected: Settings.renderer == .realWindows, width: 200) {
+                        model.setRenderer(.realWindows)
+                    } picture: {
+                        ModePicture(live: true)
+                    }
+                    // Can't load live windows here: screen capture stays, but a Mac showing stills may still pick it.
+                    .disabled(!model.liveSelectable)
+                    PictureTile(title: "Screen capture", selected: Settings.renderer == .capture, width: 200) {
+                        model.setRenderer(.capture)
+                    } picture: {
+                        ModePicture(live: false)
+                    }
+                }
+                .padding(.vertical, 4)
+                .accessibilityLabel("Mode")
+            } header: {
+                SectionHeader(title: "Mode", detail: rendererDetail)
+            }
+            Section {
+                LabeledContent {
+                    Button("Set Up…") { model.onSetup() }
+                } label: {
+                    RowLabel(title: "Set Up Sunlight", subtitle: setupSubtitle)
+                }
+                LabeledContent {
+                    Button("Reload…") { model.onReloadLiveWindows?() }
+                        .disabled(model.canReloadLiveWindows?() != true)
+                } label: {
+                    RowLabel(title: "Reload live windows", subtitle: "After a Dock restart.")
+                }
+                LabeledContent {
+                    Button("Diagnose…") { SetupDiagnose.run(from: model.window) }
+                } label: {
+                    RowLabel(title: "Diagnose", subtitle: "Copies a report for a bug.")
+                }
+                DisclosureGroup(isExpanded: $model.showSetupLog) {
+                    ScrollView {
+                        Text(model.setupLog)
+                            .font(.system(size: 10, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: 140)
+                } label: {
+                    RowLabel(title: "Setup log", subtitle: "What setup did, and when.")
+                }
+            } header: {
+                SectionHeader(title: "Setup",
+                              detail: "Live windows need System Integrity Protection partly off.")
+            }
+        }
+        .formStyle(.grouped)
+        .toggleStyle(.switch)
+    }
+
+    private var setupSubtitle: String {
+        guard model.setupChecked else { return "Checking…" }
+        return model.setupDone >= model.setupTotal ? "All done." : "\(model.setupDone) of \(model.setupTotal) steps done."
+    }
+
+    private var rendererDetail: String {
+        if !model.liveSelectable {
+            return Settings.renderer == .capture
+                ? "Live windows can’t load on this Mac."
+                : "Live windows can’t load here. Pick Screen capture."
+        }
+        if Settings.previewMode { return "Screen capture until setup is done." }
+        return "Screen capture uses more memory and power."
+    }
+
+    private var addOnLine: String {
+        switch model.liveStatus.state {
+        case .checking: return "checking…"
+        case .live: return "loaded"
+        case .preview, .loadable: return "not loaded yet"
+        case .unavailable: return "missing"
+        }
+    }
+
+    private var addOnMark: PipelineMark {
+        switch model.liveStatus.state {
+        case .checking: return .pending
+        case .live: return .done
+        case .preview, .loadable: return .todo
+        case .unavailable: return .failed
+        }
+    }
+
+    private var canvasLine: String {
+        if model.liveStatus.state == .live && Settings.renderer == .realWindows { return "live, scaled" }
+        if Settings.capturesStream { return "pictures, streamed" }
+        return model.liveStatus.state == .checking ? "checking…" : "still pictures"
+    }
+
+    private var canvasMark: PipelineMark {
+        if model.liveStatus.state == .checking { return .pending }
+        if model.liveStatus.state == .live && Settings.renderer == .realWindows { return .done }
+        return Settings.capturesStream ? .todo : .failed
+    }
+
+    private var statusTitle: String {
+        switch model.liveStatus.state {
+        case .checking: return "Checking…"
+        case .live: return "Live windows on"
+        case .preview: return "Preview mode"
+        case .loadable: return "Not loaded"
+        case .unavailable: return "Unavailable"
+        }
+    }
+
+    private var statusColor: Color {
+        switch model.liveStatus.state {
+        case .checking: return .secondary
+        case .live: return .green
+        case .preview, .loadable: return .orange
+        case .unavailable: return .red
+        }
+    }
+}
+
+/// One stage on the way from real windows to the canvas: a picture with a mark on its corner, its
+/// name and a line under it.
+/// The mark on a stage's corner. Lives outside `PipelineStage` because a type nested in a generic
+/// can't be named without the generic's argument.
+enum PipelineMark { case done, todo, failed, pending }
+
+struct PipelineStage<Picture: View>: View {
+    let title: String
+    let line: String
+    let mark: PipelineMark
+    @ViewBuilder let picture: () -> Picture
+
+    var body: some View {
+        VStack(spacing: 6) {
+            picture()
+                .frame(width: 120, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
+                .overlay(alignment: .topTrailing) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 16, weight: .semibold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, colour)
+                        .background(Circle().fill(Color(nsColor: .controlBackgroundColor)).padding(1))
+                        .offset(x: 6, y: -6)
+                }
+            Text(title).font(.subheadline).fontWeight(.semibold)
+            Text(line).font(.caption).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(line)")
+    }
+
+    private var symbol: String {
+        switch mark {
+        case .done: return "checkmark.circle.fill"
+        case .todo: return "exclamationmark.circle.fill"
+        case .failed: return "xmark.circle.fill"
+        case .pending: return "ellipsis.circle.fill"
+        }
+    }
+
+    private var colour: Color {
+        switch mark {
+        case .done: return .green
+        case .todo: return .orange
+        case .failed: return .red
+        case .pending: return .gray
+        }
+    }
+}
+
+private struct PipelineArrow: View {
+    var body: some View {
+        Image(systemName: "arrow.right")
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(height: 64)
+            .accessibilityHidden(true)
+    }
+}
+
+/// A few windows on the sky, at the tile's size; captured ones under a film's scan lines.
+struct MiniWindowsPicture: View {
+    let windows: [CGRect]
+    var captured = false
+
+    var body: some View {
+        Canvas { ctx, drawn in
+            let screen = SettingsPictures.screen(in: &ctx, drawn: drawn, base: SettingsPictures.tileSize, bezel: 0)
+            for r in windows { MiniCanvasPicture.drawWindow(r, acted: false, in: &ctx) }
+            if captured {
+                var y = screen.minY + 1
+                while y < screen.maxY {
+                    ctx.fill(Path(CGRect(x: screen.minX, y: y, width: screen.width, height: 1)), with: .color(.black.opacity(0.09)))
+                    y += 3
+                }
+            }
+        }
+    }
+}
+
+/// The Dock, with Sunlight's rays among its icons.
+struct DockPicture: View {
+    var body: some View {
+        Canvas { ctx, drawn in
+            let base = SettingsPictures.tileSize
+            let k = drawn.width / base.width
+            ctx.scaleBy(x: k, y: k)
+            let whole = CGRect(origin: .zero, size: base)
+            ctx.fill(Path(whole), with: .linearGradient(Gradient(colors: [Color(white: 0.92), Color(white: 0.8)]),
+                                                        startPoint: CGPoint(x: whole.midX, y: whole.minY), endPoint: CGPoint(x: whole.midX, y: whole.maxY)))
+            let bar = CGRect(x: 14, y: base.height - 24, width: base.width - 28, height: 17)
+            var shadowed = ctx
+            shadowed.addFilter(.shadow(color: .black.opacity(0.2), radius: 3, y: 1))
+            shadowed.fill(Path(roundedRect: bar, cornerRadius: 5, style: .continuous), with: .color(.white.opacity(0.7)))
+            for i in 0..<4 {
+                let r = CGRect(x: bar.minX + 5 + CGFloat(i) * 15, y: bar.minY + 3.5, width: 10, height: 10)
+                let colour = i == 2 ? SettingsPictures.sun : SettingsPictures.apps[i]
+                ctx.fill(Path(roundedRect: r, cornerRadius: 3, style: .continuous), with: .color(colour))
+                if i == 2 { ctx.stroke(Path(roundedRect: r.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 4), with: .color(.white), lineWidth: 1.2) }
+            }
+        }
+    }
+}
+
+// MARK: - Experimental
+
+/// Unfinished features, each a card with its picture, its switch, and its own settings under it while
+/// it's on: Arrange and Tidy, strip mode, a canvas per display, using windows at any zoom.
+private struct ExperimentalPane: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        Form {
+            Section {
+                LabCard(kind: .arranging, title: "Arranging",
+                        line: "Arrange in columns (⌃⌥2–4) or tidy everything (⌃⌥A).",
+                        on: model.bind({ Settings.arranging }, { Settings.arranging = $0 })) {
+                    Picker(selection: model.bind({ Settings.tidyColumns }, { Settings.tidyColumns = $0 })) {
+                        Text("Auto").tag(0)
+                        ForEach(2...6, id: \.self) { Text("\($0)").tag($0) }
+                    } label: {
+                        RowLabel(title: "Tidy columns")
+                    }
+                    Picker(selection: model.bind({ Settings.tidySizing }, { Settings.tidySizing = $0 })) {
+                        ForEach(Tidy.Sizing.allCases, id: \.self) { Text($0.title) }
+                    } label: {
+                        RowLabel(title: "Sizes",
+                                 info: "Same size gives every window an equal cell.")
+                    }
+                    Picker(selection: model.bind({ Settings.tidySpacing }, { Settings.tidySpacing = $0 })) {
+                        ForEach(Tidy.Spacing.allCases, id: \.self) { Text($0.title) }
+                    } label: {
+                        RowLabel(title: "Spacing", subtitle: "In tiling gaps.")
+                    }
+                    .pickerStyle(.segmented)
+                    Picker(selection: model.bind({ Settings.tidyOrder }, { Settings.tidyOrder = $0 })) {
+                        ForEach(Tidy.Order.allCases, id: \.self) { Text($0.title) }
+                    } label: {
+                        RowLabel(title: "Order", subtitle: "How windows are lined up.")
+                    }
+                }
+                LabCard(kind: .strip, title: "Strip mode",
+                        line: "Every app on one endless strip (⌃⌥S).",
+                        on: model.bind({ Settings.stripModeEnabled }, { model.setStripModeEnabled($0) })) {
+                    Toggle(isOn: model.bind({ Settings.stripMode }, { on in
+                        NotificationCenter.default.post(name: Settings.stripModeRequested, object: NSNumber(value: on))
+                    })) {
+                        RowLabel(title: "On the strip now",
+                                 subtitle: "⌃⌥ arrows step along it.")
+                    }
+                }
+                LabCard(kind: .displays, title: "Multiple displays",
+                        line: "A canvas on each display. ⌃⌥⇧ arrows move windows over.",
+                        on: model.bind({ Settings.multipleDisplays }, { Settings.multipleDisplays = $0 })) {
+                    EmptyView()
+                }
+                LabCard(kind: .anyZoom, title: "Use windows at any zoom",
+                        line: "Click and type in windows while zoomed out.",
+                        info: "Live windows only. A click focuses a window; until then a drag anywhere moves it. Once you’re in it, drags are the app’s own (select text, drag a file), the title bar or ⌘ moves it, and a double-click still brings it to the middle at 1:1. Scroll bars and sliders are always the app’s. Right-click opens Sunlight’s window menu anywhere on a window. Pinch and two-finger scroll over a window move the canvas until you’re in the window; then they’re the window’s.",
+                        on: model.bind({ Settings.useScaledWindows }, { Settings.useScaledWindows = $0 })) {
+                    Toggle(isOn: model.bind({ Settings.scaledClickZooms }, { Settings.scaledClickZooms = $0 })) {
+                        RowLabel(title: "Single click zooms in",
+                                 subtitle: "Double-click to focus in place.")
+                    }
+                    Toggle(isOn: model.bind({ Settings.scaledHoverFocus }, { Settings.scaledHoverFocus = $0 })) {
+                        RowLabel(title: "Focus follows the pointer",
+                                 subtitle: "No click needed to focus.")
+                    }
+                }
+                LabCard(kind: .agent, title: "Tell Sunlight",
+                        line: "Say what to do with your windows and apps (⌃⌥Space).",
+                        info: "Each request sends what you typed and your window list (app names, titles, positions) to Anthropic’s API with your key, plus the text of a window it works inside. Nothing is sent until you press ⏎. Sending, deleting, paying or publishing waits for your Allow. Settings, passwords and terminal apps are never worked inside. The key stays in your keychain.",
+                        on: model.bind({ Settings.tellSunlight }, { Settings.tellSunlight = $0 })) {
+                    AgentKeyRow()
+                }
+            } header: {
+                SectionHeader(title: "Experimental",
+                              detail: "Unfinished features. Off by default.")
+            }
+        }
+        .formStyle(.grouped)
+        .toggleStyle(.switch)
+    }
+}
+
+/// A feature's card: its picture, name and line beside its switch, and its own rows under them while
+/// it's on, indented to the text.
+struct LabCard<Rows: View>: View {
+    let kind: LabPicture.Kind
+    let title: String
+    let line: String
+    var info: String? = nil
+    @Binding var on: Bool
+    @ViewBuilder let rows: () -> Rows
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                LabPicture(kind: kind)
+                RowLabel(title: title, subtitle: line, info: info)
+                Spacer(minLength: 8)
+                Toggle(title, isOn: $on).labelsHidden()
+            }
+            .padding(.vertical, 4)
+            if on {
+                VStack(alignment: .leading, spacing: 0) {
+                    rows()
+                        .padding(.vertical, 6)
+                }
+                .padding(.leading, 76)
+                .padding(.top, 4)
+            }
+        }
     }
 }
 
@@ -1224,7 +1929,7 @@ private struct DesktopMapRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            RowLabel(title: "Where they sit", subtitle: "Drag the blue dot for the files, the orange one for the widgets.")
+            RowLabel(title: "Where they sit", subtitle: "Drag the dots to move files and widgets.")
             map.frame(maxWidth: .infinity)
             HStack {
                 Spacer()
@@ -1343,332 +2048,6 @@ private struct DesktopMapRow: View {
     }
 }
 
-// MARK: - Windows
-
-/// What happens under the hand while a window is dragged (guides, the grid, magnetism, haptics), and
-/// the gap tiling leaves.
-private struct WindowsPane: View {
-    @ObservedObject var model: SettingsModel
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle(isOn: model.bind({ Settings.alignmentGuides }, { Settings.alignmentGuides = $0 })) {
-                    RowLabel(title: "Alignment guides",
-                             subtitle: "A dragged window’s edges and centre stick to its neighbours’, with a guide drawn.")
-                }
-                Toggle(isOn: model.bind({ Settings.snapToGrid }, { Settings.snapToGrid = $0 })) {
-                    RowLabel(title: "Snap to grid",
-                             subtitle: "A window settles onto the grid when you let go.")
-                }
-                Picker(selection: model.bind({ Settings.gridSize }, { Settings.gridSize = $0 })) {
-                    ForEach(Settings.gridSizes, id: \.self) { Text("\(Int($0)) pt") }
-                } label: {
-                    RowLabel(title: "Grid step",
-                             subtitle: "Also the gap the guides leave between two windows side by side.")
-                }
-                .disabled(!Settings.snapToGrid && !Settings.alignmentGuides)
-            } header: {
-                SectionHeader(title: "Dragging",
-                              detail: "Hold ⌘ while dragging to ignore all of these and place a window freely, over another if you like.")
-            }
-            Section {
-                Toggle("Windows push each other", isOn: model.bind({ Settings.magnetism }, { model.setMagnetism($0) }))
-                LabeledContent {
-                    HStack(spacing: 8) {
-                        Text("Gentle").font(.caption).foregroundStyle(.secondary)
-                        Slider(value: model.bind({ Double(Settings.magnetismStrength) }, { Settings.magnetismStrength = CGFloat($0) }), in: 0...1)
-                            .frame(width: 160)
-                        Text("Firm").font(.caption).foregroundStyle(.secondary)
-                    }
-                } label: {
-                    RowLabel(title: "Strength",
-                             subtitle: "Gentle pushes a window only once it’s touched. Firm keeps a gap and shoves whole rows along.")
-                }
-                .disabled(!Settings.magnetism)
-                Toggle(isOn: model.bind({ Settings.magneticPolarity }, { model.setPolarity($0) })) {
-                    RowLabel(title: "Magnetic polarity",
-                             subtitle: "Like poles push apart; opposite poles pull together and move as one.",
-                             info: "Experimental. Every window is ⊕ or ⊖. Click a window’s pole, or press P over it, to flip it.")
-                }
-                .disabled(!Settings.magnetism)
-            } header: {
-                SectionHeader(title: "Magnetism",
-                              detail: "A dragged or resized window moves its neighbours out of the way instead of covering them.")
-            }
-            Section {
-                Picker(selection: model.bind({ nearestGap }, { Settings.tileGap = $0 })) {
-                    ForEach(Settings.tileGaps, id: \.self) { Text($0 == 0 ? "None" : "\(Int($0)) pt") }
-                } label: {
-                    RowLabel(title: "Gap",
-                             subtitle: Settings.arranging
-                                 ? "From the screen’s edges and between windows side by side, for Move & Resize, Arrange and Tidy."
-                                 : "From the screen’s edges and between windows side by side, for Move & Resize.",
-                             info: "Also how far a Firm push reaches, and how close bonded windows sit.")
-                }
-            } header: {
-                SectionHeader(title: "Tiling",
-                              detail: "⌃⌥ with the arrows tiles halves, U I J K quarters, D F G thirds, ⏎ the whole screen. All of them are in the Window menu too.")
-            }
-            Section {
-                Picker(selection: model.bind({ Settings.windowEffect }, { Settings.windowEffect = $0 })) {
-                    ForEach(WindowEffect.allCases) { Text($0.title).tag($0) }
-                } label: {
-                    RowLabel(title: "Effect",
-                             subtitle: Self.effectSubtitle(Settings.windowEffect),
-                             info: "Closing from the canvas plays the effect first, then presses the window’s close button. If the app keeps the window, for a “save changes?” sheet say, it opens again.")
-                }
-            } header: {
-                SectionHeader(title: "Opening and closing",
-                              detail: "With Reduce Motion on in System Settings › Accessibility › Display, every effect but None is a plain fade.")
-            }
-            Section {
-                Toggle(isOn: model.bind({ Settings.haptics }, { Settings.haptics = $0 })) {
-                    RowLabel(title: "Trackpad haptics",
-                             subtitle: "A tick as an edge catches a guide, a bump as windows meet.",
-                             info: "Also a flutter as like poles repel, and a click as they bond.")
-                }
-            } header: {
-                SectionHeader(title: "Feedback",
-                              detail: "Force Touch trackpads only, and only with haptic feedback on in System Settings › Trackpad.")
-            } footer: {
-                HStack {
-                    Spacer()
-                    HelpLink { model.onPlacingGuide?() }
-                        .help("How placing works")
-                }
-                .padding(.top, 8)
-            }
-        }
-        .formStyle(.grouped)
-        .toggleStyle(.switch)
-    }
-
-    static func effectSubtitle(_ effect: WindowEffect) -> String {
-        switch effect {
-        case .automatic: return "A window grows out of the spot you opened it at, slides out from behind the window it lands beside, or rises into place like the sun. Sheets unfold."
-        case .sunrise: return "Rises a few points into place as it brightens, and sinks and dims as it closes."
-        case .unfold: return "Rolls down from its top edge, and back up as it closes."
-        case .bloom: return "Springs up from a little smaller with a ring spreading from its edges."
-        case .dissolve: return "Fades in and out where it is."
-        case .none: return "Windows appear and disappear at once."
-        }
-    }
-
-    /// The nearest of the gaps on offer: one set with `defaults write` needn't be among them.
-    private var nearestGap: CGFloat {
-        let gap = Settings.tileGap
-        return Settings.tileGaps.min(by: { abs($0 - gap) < abs($1 - gap) }) ?? 8
-    }
-}
-
-// MARK: - Arrange
-
-/// How Tidy lays everything out. A pane only while arranging is on; tiling's gap is under Windows.
-private struct ArrangePane: View {
-    @ObservedObject var model: SettingsModel
-
-    var body: some View {
-        Form {
-            Section {
-                Picker(selection: model.bind({ Settings.tidyColumns }, { Settings.tidyColumns = $0 })) {
-                    Text("Auto").tag(0)
-                    ForEach(2...6, id: \.self) { Text("\($0)").tag($0) }
-                } label: {
-                    RowLabel(title: "Columns", subtitle: "Auto fits as many as the windows’ widths allow.")
-                }
-                Picker(selection: model.bind({ Settings.tidySizing }, { Settings.tidySizing = $0 })) {
-                    ForEach(Tidy.Sizing.allCases, id: \.self) { Text($0.title) }
-                } label: {
-                    RowLabel(title: "Sizes",
-                             subtitle: "Same size puts each window in a cell that is a fraction of the screen.",
-                             info: "As many cells down as across; windows beyond one screen go on the next one below.")
-                }
-                Picker(selection: model.bind({ Settings.tidySpacing }, { Settings.tidySpacing = $0 })) {
-                    ForEach(Tidy.Spacing.allCases, id: \.self) { Text($0.title) }
-                } label: {
-                    RowLabel(title: "Spacing", subtitle: "How much room Tidy leaves between windows, counted in gaps.")
-                }
-                .pickerStyle(.segmented)
-                Picker(selection: model.bind({ Settings.tidyOrder }, { Settings.tidyOrder = $0 })) {
-                    ForEach(Tidy.Order.allCases, id: \.self) { Text($0.title) }
-                } label: {
-                    RowLabel(title: "Order",
-                             subtitle: "Where they sit now, the one used last first, or an app’s windows together.")
-                }
-            } header: {
-                SectionHeader(title: "Tidy",
-                              detail: "Tidy (⌃⌥A, or the menu bar panel) lays every window out from the screen you’re looking at, with the gap set in Windows › Tiling.")
-            }
-        }
-        .formStyle(.grouped)
-        .toggleStyle(.switch)
-    }
-}
-
-// MARK: - Shortcuts
-
-/// What the canvas does with the pointer, trackpad and keys (`ShortcutReference`): a list to read, not
-/// to change. Also Instructions › Keyboard Shortcuts.
-struct ShortcutsPane: View {
-    var body: some View {
-        Form {
-            Section {
-                ForEach(ShortcutReference.canvasRows, id: \.title) { row in
-                    LabeledContent(row.title) { Text(row.keys).foregroundStyle(.secondary) }
-                }
-            } header: {
-                SectionHeader(title: "Canvas")
-            }
-            Section {
-                ForEach(ShortcutReference.commandRows, id: \.title) { row in
-                    LabeledContent(row.title) { Text(row.keys).foregroundStyle(.secondary) }
-                }
-            } header: {
-                SectionHeader(title: "Sunlight",
-                              detail: "The ⌃⌥ keys work from inside a window too. Everything else is in the sun-rays icon in the menu bar.")
-            }
-        }
-        .formStyle(.grouped)
-        .toggleStyle(.switch)
-    }
-}
-
-// MARK: - Live windows
-
-/// How windows reach the canvas: live, or as pictures; and how far setup has come.
-private struct LiveWindowsPane: View {
-    @ObservedObject var model: SettingsModel
-
-    var body: some View {
-        Form {
-            Section {
-                HStack(spacing: 12) {
-                    Image(systemName: "bolt.fill")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
-                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(statusColor.gradient))
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(statusTitle).font(.headline)
-                        Text(model.liveStatus.text)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 0)
-                    Image(systemName: statusSymbol)
-                        .font(.title2)
-                        .foregroundStyle(statusColor)
-                        .accessibilityHidden(true)
-                }
-                .padding(.vertical, 4)
-                LabeledContent("Setup") {
-                    HStack(spacing: 6) {
-                        Text(setupValue)
-                        InfoButton(text: model.setupSummary)
-                    }
-                }
-            }
-            Section {
-                LabeledContent {
-                    Button("Set Up…") { model.onSetup() }
-                } label: {
-                    RowLabel(title: "Set Up Sunlight", subtitle: "Every step from permissions to live windows, one at a time.")
-                }
-                LabeledContent {
-                    Button("Reload…") { model.onReloadLiveWindows?() }
-                        .disabled(model.canReloadLiveWindows?() != true)
-                } label: {
-                    RowLabel(title: "Reload live windows", subtitle: "Loads them into the Dock again after a Dock restart unloaded them.")
-                }
-                LabeledContent {
-                    Button("Diagnose…") { SetupDiagnose.run(from: model.window) }
-                } label: {
-                    RowLabel(title: "Diagnose", subtitle: "Copies a plain-text report about this Mac’s setup, for an issue.")
-                }
-            } header: {
-                SectionHeader(title: "Setup",
-                              detail: "Live windows are the real windows, scaled onto the canvas by an addition in the Dock. They need System Integrity Protection partly off.")
-            }
-            Section {
-                Picker(selection: model.bind({ Settings.renderer }, { model.setRenderer($0) })) {
-                    Text("Live windows").tag(Settings.Renderer.realWindows)
-                    Text("Screen capture").tag(Settings.Renderer.capture)
-                } label: {
-                    RowLabel(title: "Mode", subtitle: rendererSubtitle)
-                }
-                .pickerStyle(.segmented)
-                // Can't load live windows here: screen capture stays, but a Mac showing stills may still pick it.
-                .disabled(!model.liveSelectable && Settings.renderer == .capture)
-            } header: {
-                SectionHeader(title: "How windows show",
-                              detail: "Live windows are the real windows. Screen capture streams pictures of them instead, for Macs that can’t load live windows; it uses more memory and power.")
-            }
-            Section {
-                DisclosureGroup(isExpanded: $model.showSetupLog) {
-                    ScrollView {
-                        Text(model.setupLog)
-                            .font(.system(size: 10, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(height: 140)
-                } label: {
-                    RowLabel(title: "Setup log", subtitle: "What setup did and when, and what the helper answered.")
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .toggleStyle(.switch)
-    }
-
-    private var rendererSubtitle: String {
-        if !model.liveSelectable {
-            return Settings.renderer == .capture
-                ? "Live windows can’t be loaded on this Mac, so screen capture it is."
-                : "Live windows can’t be loaded on this Mac. Pick Screen capture to see windows move."
-        }
-        if Settings.previewMode { return "Screen capture until setup loads live windows, then live by themselves." }
-        return Settings.renderer == .capture ? "Live windows load again when picked." : "The real windows, scaled by the Dock."
-    }
-
-    private var setupValue: String {
-        guard model.setupChecked else { return "Checking…" }
-        return model.setupDone >= model.setupTotal ? "Done" : "\(model.setupDone) of \(model.setupTotal) steps"
-    }
-
-    private var statusTitle: String {
-        switch model.liveStatus.state {
-        case .checking: return "Checking…"
-        case .live: return "Live windows on"
-        case .preview: return "Preview mode"
-        case .loadable: return "Live windows not loaded"
-        case .unavailable: return "Live windows unavailable"
-        }
-    }
-
-    /// The state as a shape too, so it doesn't rest on colour alone.
-    private var statusSymbol: String {
-        switch model.liveStatus.state {
-        case .checking: return "ellipsis.circle.fill"
-        case .live: return "checkmark.circle.fill"
-        case .preview, .loadable: return "exclamationmark.triangle.fill"
-        case .unavailable: return "xmark.octagon.fill"
-        }
-    }
-
-    private var statusColor: Color {
-        switch model.liveStatus.state {
-        case .checking: return .gray
-        case .live: return .green
-        case .preview, .loadable: return .orange
-        case .unavailable: return .red
-        }
-    }
-}
-
 extension NSColor {
     /// True when black text out-contrasts white on this colour (WCAG relative luminance above ~0.18).
     var isLight: Bool {
@@ -1677,5 +2056,49 @@ extension NSColor {
         let luminance = 0.2126 * linear(c.redComponent) + 0.7152 * linear(c.greenComponent)
             + 0.0722 * linear(c.blueComponent)
         return luminance > 0.179
+    }
+}
+
+// MARK: - Tell Sunlight's key
+
+/// The Anthropic API key, typed or pasted once and kept in the keychain (`AgentKey`). Shown only as its
+/// last four characters after that.
+private struct AgentKeyRow: View {
+    @State private var saved = AgentKey.stored.map(AgentKey.masked)
+    @State private var typed = ""
+    @State private var failed = false
+
+    var body: some View {
+        if let saved {
+            LabeledContent {
+                Button("Remove") {
+                    AgentKey.remove()
+                    self.saved = nil
+                }
+            } label: {
+                RowLabel(title: "Anthropic API key", subtitle: "Saved in your keychain: \(saved)")
+            }
+        } else {
+            LabeledContent {
+                HStack {
+                    SecureField("sk-ant-…", text: $typed)
+                        .frame(width: 220)
+                        .onSubmit(save)
+                    Button("Save", action: save)
+                        .disabled(typed.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            } label: {
+                RowLabel(title: "Anthropic API key",
+                         subtitle: failed ? "The keychain didn’t take it. Try again." : "From console.anthropic.com › API keys.")
+            }
+        }
+    }
+
+    private func save() {
+        let key = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        failed = !AgentKey.save(key)
+        typed = ""
+        if !failed { saved = AgentKey.masked(key) }
     }
 }

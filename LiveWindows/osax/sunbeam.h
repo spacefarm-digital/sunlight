@@ -13,6 +13,9 @@
 #define SUNBEAM_HANDOFF    0x73
 #define SUNBEAM_SHADOW     0x74
 #define SUNBEAM_ALPHA      0x75
+#define SUNBEAM_PIN        0x76
+#define SUNBEAM_SHAPE      0x77
+#define SUNBEAM_ANCHOR     0x79
 #define SUNBEAM_LIMIT      128
 #define SUNBEAM_MAGIC      "SUNBEAM1\n"
 // A frame's flags byte (since sunlight-8; a frame without one is taken the old way). Full: level and
@@ -58,6 +61,10 @@ extern CGError SLSTransactionMoveWindowWithGroup(CFTypeRef transaction, uint32_t
 // is born under the backdrop and shows only once the canvas has placed and lifted it. No order, timing
 // or announcement latency can show it first. Nothing of AppKit's sits at 2.
 #define SUNBEAM_FRONT 2
+// The level of a window pinned to the screen (sunlight-42, `SUNBEAM_PIN`): a small picture of itself
+// the canvas keeps at one spot on the screen, which stays on show while the canvas is away, over the
+// entered window and the front app's, at the canvas's transform. Nothing of AppKit's sits at 3 either.
+#define SUNBEAM_PINNED 3
 
 // MARK: Shadows
 //
@@ -81,6 +88,21 @@ extern CGError SLSGetWindowShadowAndRimParameters(int cid, uint32_t wid, float *
 // back under the canvas, handed off, or the lease ending — so a window can't be left see-through.
 extern CGError SLSSetWindowAlpha(int cid, uint32_t wid, float alpha) SUNBEAM_WEAK;
 extern CGError SLSGetWindowAlpha(int cid, uint32_t wid, float *alpha) SUNBEAM_WEAK;
+
+// A window's shape (sunlight-52, `SUNBEAM_SHAPE`): a window in Picture in Picture is drawn as a tile with
+// rounded corners, as a video's is. The window server clips a window to a region (a list of rectangles,
+// in the window's own points), so the rounded rectangle is built as rows, one point each at the corners,
+// which the tile's transform scales down to a fraction of a pixel. The shape's offsets are the window's
+// native place, read off its bounds, so the window stays where it is. The region calls are CoreGraphics's
+// CGS ones (SkyLight exports no SLS twins of them, CI's linker says); the shape call is SkyLight's, the
+// CGS one with the SLS prefix, as yabai uses for its own windows. Weak, as above. The shapes the
+// canvas set are kept across leases, like the pinned windows: the canvas puts a window's full shape back
+// when it leaves Picture in Picture, and a release that puts the window back does the same.
+extern CGError CGSNewRegionWithRect(const CGRect *rect, CFTypeRef *region) SUNBEAM_WEAK;
+extern CGError CGSNewRegionWithRectList(const CGRect *rects, int count, CFTypeRef *region) SUNBEAM_WEAK;
+extern CGError SLSSetWindowShape(int cid, uint32_t wid, float x_offset, float y_offset, CFTypeRef region) SUNBEAM_WEAK;
+#define SUNBEAM_SHAPES 32
+#define SUNBEAM_SHAPE_RADIUS 256
 
 /// A shadow look as AppKit's dictionary has it: the blur radius and vertical offset (whole points),
 /// the shadow's density and the rim's.
@@ -123,7 +145,18 @@ struct sunbeam_session_state {
     // The top of the display's visible part (under the menu bar), global, from the canvas's last
     // handoff (sunlight-28); NAN until one says. See `sunbeam_native_at`.
     double top;
+    // The windows pinned to the screen (sunlight-42, `SUNBEAM_PIN`): at a handoff, or a release for an
+    // app that took the front, a leased one among them stays on show as it is, at `SUNBEAM_PINNED`.
+    uint32_t pinned[SUNBEAM_LIMIT];
+    int pinned_count;
 };
+
+/// Whether the canvas has `wid` pinned to the screen.
+static bool sunbeam_is_pinned(const struct sunbeam_session_state *state, uint32_t wid)
+{
+    for (int i = 0; state && i < state->pinned_count; ++i) if (state->pinned[i] == wid) return true;
+    return false;
+}
 
 /// Where a window drawn at `drawn` at native size sits natively (sunlight-28): no higher than `top`.
 /// AppKit keeps a window's title bar under the menu bar: a window moved natively above it (one kept on
@@ -451,6 +484,107 @@ static uint8_t sunbeam_alpha_set(const char *bytes, int length, struct sunbeam_s
     return 0;
 }
 
+// MARK: Shapes
+
+/// A window the canvas gave rounded corners: put back to its full shape when it is released with the
+/// rest (the lease's end) or the canvas asks for a radius of 0.
+struct sunbeam_shaped { uint32_t wid; int owner; };
+static struct sunbeam_shaped sunbeam_shapes[SUNBEAM_SHAPES];
+
+static bool sunbeam_shape_available(void)
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpointer-bool-conversion"   // real checks in the add-on, where the symbols are weak
+    return CGSNewRegionWithRect && CGSNewRegionWithRectList && SLSSetWindowShape;
+#pragma clang diagnostic pop
+}
+
+/// The rectangles of a `width` by `height` rounded rectangle with corners of `radius` (whole points, no
+/// more than half the shorter side), rows one point tall at the corners and one rectangle between:
+/// `2 * radius + 1` of them, into `rects`, which holds `2 * SUNBEAM_SHAPE_RADIUS + 1`. Returns how many.
+static int sunbeam_rounded_rects(double width, double height, int radius, CGRect *rects)
+{
+    if (radius > SUNBEAM_SHAPE_RADIUS) radius = SUNBEAM_SHAPE_RADIUS;
+    if (radius * 2 > (int)fmin(width, height)) radius = (int)fmin(width, height) / 2;
+    if (radius <= 0) { rects[0] = CGRectMake(0, 0, width, height); return 1; }
+    int n = 0;
+    for (int y = 0; y < radius; ++y) {
+        // The row's middle, measured from the corner circle's centre: how far in the circle's edge is there.
+        double d = radius - (y + 0.5);
+        double inset = radius - sqrt((double)radius * radius - d * d);
+        rects[n++] = CGRectMake(inset, y, width - 2 * inset, 1);
+    }
+    rects[n++] = CGRectMake(0, radius, width, height - 2 * radius);
+    for (int y = radius - 1; y >= 0; --y) {
+        double d = radius - (y + 0.5);
+        double inset = radius - sqrt((double)radius * radius - d * d);
+        rects[n++] = CGRectMake(inset, height - 1 - y, width - 2 * inset, 1);
+    }
+    return n;
+}
+
+/// Sets `wid`'s shape to its bounds with corners of `radius` points (0: its full bounds again), at the
+/// native place it has. False when the window server refused or won't describe the window.
+static bool sunbeam_shape_apply(uint32_t wid, int radius)
+{
+    int cid = SLSMainConnectionID();
+    CGRect bounds;
+    if (SLSGetWindowBounds(cid, wid, &bounds) != kCGErrorSuccess) return false;
+    double width = floor(bounds.size.width), height = floor(bounds.size.height);
+    if (width < 1 || height < 1) return false;
+    CGRect rects[2 * SUNBEAM_SHAPE_RADIUS + 1];
+    int n = sunbeam_rounded_rects(width, height, radius, rects);
+    CFTypeRef region = NULL;
+    CGError made = n == 1 ? CGSNewRegionWithRect(&rects[0], &region) : CGSNewRegionWithRectList(rects, n, &region);
+    if (made != kCGErrorSuccess || !region) return false;
+    CGError set = SLSSetWindowShape(cid, wid, (float)bounds.origin.x, (float)bounds.origin.y, region);
+    CFRelease(region);
+    return set == kCGErrorSuccess;
+}
+
+static struct sunbeam_shaped *sunbeam_shape_find(uint32_t wid)
+{
+    for (int i = 0; i < SUNBEAM_SHAPES; ++i) if (sunbeam_shapes[i].wid == wid) return &sunbeam_shapes[i];
+    return NULL;
+}
+
+/// The window's full shape back, if the canvas rounded it and the window is still the one it was.
+static void sunbeam_shape_reset(uint32_t wid)
+{
+    struct sunbeam_shaped *shaped = sunbeam_shape_find(wid);
+    if (!shaped) return;
+    int owner = 0;
+    if (sunbeam_shape_available() && SLSGetWindowOwner(SLSMainConnectionID(), wid, &owner) == kCGErrorSuccess && owner == shaped->owner) {
+        sunbeam_shape_apply(wid, 0);
+    }
+    shaped->wid = 0;
+}
+
+/// The request: a window and a corner radius in its own points (8 bytes). The window needn't be leased:
+/// a tile stays on show while the canvas is away, when nothing is. Status 1 for a request that makes no
+/// sense, 11 when SkyLight has no shape calls here, 12 when the window won't be described or the window
+/// server refused the shape. A radius over `SUNBEAM_SHAPE_RADIUS`, or over half the shorter side, is
+/// taken as that.
+static uint8_t sunbeam_shape_set(const char *bytes, int length)
+{
+    if (length != 8) return 1;
+    uint32_t wid; float radius;
+    memcpy(&wid, bytes, 4); memcpy(&radius, bytes + 4, 4);
+    if (!wid || !isfinite(radius) || radius < 0) return 1;
+    if (!sunbeam_shape_available()) return 11;
+    int owner = 0;
+    if (SLSGetWindowOwner(SLSMainConnectionID(), wid, &owner) != kCGErrorSuccess) return 12;
+    int whole = (int)lround(radius);
+    if (whole == 0) { sunbeam_shape_reset(wid); return 0; }
+    if (!sunbeam_shape_apply(wid, whole)) return 12;
+    struct sunbeam_shaped *shaped = sunbeam_shape_find(wid);
+    if (!shaped) shaped = sunbeam_shape_find(0);
+    if (!shaped) shaped = &sunbeam_shapes[0];   // the oldest slot is reused: nothing is lost but a reset
+    shaped->wid = wid;
+    shaped->owner = owner;
+    return 0;
+}
+
 // MARK: Release
 
 /// Puts a window back as the add-on found it: its place in the stacking order, its transform, and
@@ -713,7 +847,7 @@ static void sunbeam_lifted_add(uint32_t wid, int level, uint32_t canvas)
         return;
     }
     if (sunbeam_lifted_count >= (int)(sizeof(sunbeam_lifted_list) / sizeof(*sunbeam_lifted_list))) return;
-    if (level == SUNBEAM_LEVEL || level == SUNBEAM_FRONT) level = 0;
+    if (level == SUNBEAM_LEVEL || level == SUNBEAM_FRONT || level == SUNBEAM_PINNED) level = 0;
     sunbeam_lifted_list[sunbeam_lifted_count++] = (struct sunbeam_lifted){ wid, owner, level, canvas };
 }
 
@@ -887,13 +1021,22 @@ static void sunbeam_lift_others_of(int pid, uint32_t backdrop, uint32_t overlay,
     if (list) CFRelease(list);
 }
 
-static void sunbeam_release_all(struct sunbeam_saved *saved, int count, uint32_t backdrop, uint32_t overlay, int above_pid, double top)
+/// `state`: the lease's, for the windows pinned to the screen (sunlight-42): with an app in front they
+/// stay on show as they are, at `SUNBEAM_PINNED` above that app's windows, the way the entered and kept
+/// windows stay through a handoff; with none (the lease's end, the canvas going dormant) they go back
+/// with the rest.
+static void sunbeam_release_all(struct sunbeam_saved *saved, int count, uint32_t backdrop, uint32_t overlay, int above_pid, double top,
+                                const struct sunbeam_session_state *state)
 {
     int cid = SLSMainConnectionID();
     bool canvas = backdrop && overlay && backdrop != overlay;
     bool changed = false, transacted = false;
-    bool front[SUNBEAM_LIMIT];
+    bool front[SUNBEAM_LIMIT], pinned[SUNBEAM_LIMIT];
     sunbeam_front_windows(canvas ? above_pid : 0, saved, count, front);
+    for (int i = 0; i < count; ++i) {
+        pinned[i] = canvas && above_pid && sunbeam_is_pinned(state, saved[i].wid) && sunbeam_owner_matches(&saved[i]);
+        if (pinned[i]) front[i] = false;
+    }
     for (int attempt = 0; attempt < 2; ++attempt) {
         CFTypeRef transaction = attempt == 0 ? sunbeam_transaction_begin(cid) : NULL;
         uint32_t anchor = backdrop;
@@ -903,19 +1046,25 @@ static void sunbeam_release_all(struct sunbeam_saved *saved, int count, uint32_t
             // orders among windows whose levels are final. With an app in front the canvas stays up
             // (sunlight-27) and that app's windows, leased or not, go above it; with none (the lease's
             // end, the canvas going dormant) the canvas comes down.
-            for (int i = 0; i < count; ++i) if (!front[i] && sunbeam_owner_matches(&saved[i])) sunbeam_level(NULL, cid, saved[i].wid, saved[i].level, &changed);
+            for (int i = 0; i < count; ++i) if (!front[i] && !pinned[i] && sunbeam_owner_matches(&saved[i])) sunbeam_level(NULL, cid, saved[i].wid, saved[i].level, &changed);
             if (canvas && !above_pid) sunbeam_canvas_down(NULL, cid, backdrop, overlay, &changed);
             if (canvas && above_pid) { sunbeam_level(NULL, cid, backdrop, SUNBEAM_LEVEL, &changed); sunbeam_level(NULL, cid, overlay, SUNBEAM_LEVEL, &changed); }
+            // The pinned ones before the front app's (sunlight-52, see `sunbeam_handoff_apply`): over all
+            // from the first call, as they are, their transform and alpha kept.
+            for (int i = 0; i < count; ++i) if (pinned[i]) { sunbeam_lifted_add(saved[i].wid, saved[i].level, overlay); sunbeam_level(NULL, cid, saved[i].wid, SUNBEAM_PINNED, &changed); }
             for (int i = 0; i < count; ++i) if (front[i] && sunbeam_owner_matches(&saved[i])) sunbeam_level(NULL, cid, saved[i].wid, above_pid ? SUNBEAM_FRONT : saved[i].level, &changed);
             if (canvas && above_pid) sunbeam_lift_others_of(above_pid, backdrop, overlay, saved, count);
             if (canvas) sunbeam_order(transaction, cid, backdrop, -1, overlay);
             for (int i = count - 1; i >= 0; --i) {
+                if (pinned[i]) continue;
                 if (front[i]) sunbeam_restore_in_front(transaction, &saved[i], overlay);
                 else sunbeam_restore(transaction, &saved[i], backdrop, overlay, &anchor, NULL, 0, false);
             }
         } else {
+            for (int i = 0; i < count; ++i) if (pinned[i]) { sunbeam_lifted_add(saved[i].wid, saved[i].level, overlay); sunbeam_level(NULL, cid, saved[i].wid, SUNBEAM_PINNED, &changed); }
             if (canvas) sunbeam_order(NULL, cid, backdrop, -1, overlay);
             for (int i = count - 1; i >= 0; --i) {
+                if (pinned[i]) continue;
                 if (front[i]) sunbeam_restore_in_front(NULL, &saved[i], overlay);
                 else sunbeam_restore(NULL, &saved[i], backdrop, overlay, &anchor, NULL, 0, true);
             }
@@ -933,17 +1082,23 @@ static void sunbeam_release_all(struct sunbeam_saved *saved, int count, uint32_t
         uint32_t anchor = backdrop;
         sunbeam_order(NULL, cid, backdrop, -1, overlay);
         for (int i = count - 1; i >= 0; --i) {
+            if (pinned[i]) continue;
             if (front[i]) sunbeam_restore_in_front(NULL, &saved[i], overlay);
             else sunbeam_restore(NULL, &saved[i], backdrop, overlay, &anchor, NULL, 0, false);
         }
         sunbeam_canvas_tuck(NULL, cid, backdrop, overlay, above_pid, saved, count);
     }
     // Back at native size only now, where they are out of sight (see `sunbeam_restore`); the front app's
-    // are on show at the canvas's 1:1 transform, which drew them where they are natively.
-    if (transacted) for (int i = count - 1; i >= 0; --i) sunbeam_settle_later(&saved[i], front[i] ? 0 : (canvas ? backdrop : 0), top);
+    // are on show at the canvas's 1:1 transform, which drew them where they are natively. A pinned
+    // window stays a picture of itself, at the transform the canvas drew it at.
+    if (transacted) for (int i = count - 1; i >= 0; --i) if (!pinned[i]) sunbeam_settle_later(&saved[i], front[i] ? 0 : (canvas ? backdrop : 0), top);
     // Every window's own alpha back (sunlight-40), now that each is under the backdrop or the front app's
-    // and on show as itself: the settle queue's copies don't carry what the canvas changed.
-    for (int i = 0; i < count; ++i) sunbeam_alpha_reset(&saved[i]);
+    // and on show as itself: the settle queue's copies don't carry what the canvas changed. Its full
+    // shape too (sunlight-52) unless it stays on show as a tile.
+    for (int i = 0; i < count; ++i) {
+        sunbeam_alpha_reset(&saved[i]);
+        if (!pinned[i]) sunbeam_shape_reset(saved[i].wid);
+    }
 }
 
 // MARK: Frames
@@ -1053,7 +1208,7 @@ static bool sunbeam_frame(char *bytes, int length, struct sunbeam_saved *saved, 
     // released window that was first taken over the backdrop (one entered before) would otherwise
     // show through the canvas's live look, and any of them could flash full-size for a frame.
     if (!count && backdrop && overlay && backdrop != overlay) {
-        sunbeam_release_all(saved, *saved_count, backdrop, overlay, above_pid, state->top);
+        sunbeam_release_all(saved, *saved_count, backdrop, overlay, above_pid, state->top, state);
         *saved_count = 0;
         state->order_count = 0;
         state->backdrop = backdrop;
@@ -1088,13 +1243,17 @@ static bool sunbeam_frame(char *bytes, int length, struct sunbeam_saved *saved, 
         if (index < 0) {
             struct sunbeam_saved entry = { .wid = wid };
             if (SLSGetWindowOwner(cid, wid, &entry.owner) != kCGErrorSuccess) { take[i] = place[i] = false; continue; } // closed mid-frame
+            // Closed between that read and these (the canvas listed it a moment ago), or a window the
+            // server won't describe: left out of this frame like one whose owner read failed, and the
+            // canvas lists it gone and leaves it out of the next (sunlight-43). Failing the frame here
+            // ended the lease, and every window on the canvas went back to full size for a moment.
             if (SLSGetWindowTransform(cid, wid, &entry.transform) != kCGErrorSuccess ||
-                SLSGetWindowLevel(cid, wid, &entry.level) != kCGErrorSuccess) { sunbeam_status = 2; ok = false; break; }
+                SLSGetWindowLevel(cid, wid, &entry.level) != kCGErrorSuccess) { take[i] = place[i] = false; continue; }
             // A window found at a level of the canvas's (left on show by a handoff or a release, sunlight-27)
             // goes back to its own level when put back (sunlight-41, `sunbeam_lifted`), not to that; the
             // normal level when nothing says.
             int own = sunbeam_lifted_take(wid);
-            if (entry.level == SUNBEAM_LEVEL || entry.level == SUNBEAM_FRONT) entry.level = own >= 0 ? own : 0;
+            if (entry.level == SUNBEAM_LEVEL || entry.level == SUNBEAM_FRONT || entry.level == SUNBEAM_PINNED) entry.level = own >= 0 ? own : 0;
             sunbeam_place_drop(wid);
             // A settle still pending for it (sunlight-23): its native transform is the one the settle
             // would have given it. Else a window found scaled (one left at the canvas's transform by a
@@ -1190,7 +1349,7 @@ static bool sunbeam_frame(char *bytes, int length, struct sunbeam_saved *saved, 
             for (int j = 0; j < count; ++j) if (records[j].wid == l->wid) taken = true;
             int owner = 0, level = -1;
             if (!taken && SLSGetWindowOwner(cid, l->wid, &owner) == kCGErrorSuccess && owner == l->owner
-                && SLSGetWindowLevel(cid, l->wid, &level) == kCGErrorSuccess && level == SUNBEAM_FRONT)
+                && SLSGetWindowLevel(cid, l->wid, &level) == kCGErrorSuccess && (level == SUNBEAM_FRONT || level == SUNBEAM_PINNED))
                 SLSSetWindowLevel(cid, l->wid, l->level);
             if (taken) { ++i; continue; }   // its own level is read off the list as the lease takes it
             memmove(l, l + 1, (sunbeam_lifted_count - i - 1) * sizeof(*l));
@@ -1267,14 +1426,18 @@ static void sunbeam_move(CFTypeRef transaction, int cid, uint32_t wid, CGPoint p
 /// `move`: the native moves of the entered window (to `point`) and the kept ones are this function's,
 /// made in the transaction, each just before its settled transform (`sunbeam_moves_in_transaction`);
 /// without a transaction they are made directly, just before it all the same.
+/// `pinned`: per leased window, whether it is pinned to the screen (sunlight-42): it stays on show as it
+/// is, at its transform, at `SUNBEAM_PINNED` above the entered window; no move, no order, no settle.
 static void sunbeam_handoff_apply(CFTypeRef transaction, uint32_t wid, CGPoint point, bool move,
                                   CGAffineTransform settled, uint32_t overlay,
                                   uint32_t canvas_overlay, uint32_t backdrop, struct sunbeam_saved *saved, int count, int entered,
-                                  const struct sunbeam_kept *kept, int kept_count, uint32_t anchor, bool *changed)
+                                  const struct sunbeam_kept *kept, int kept_count, const bool *pinned, uint32_t anchor, bool *changed)
 {
     int cid = SLSMainConnectionID();
-    uint32_t skip[SUNBEAM_LIMIT + 1] = { wid };
-    for (int k = 0; k < kept_count; ++k) skip[k + 1] = saved[kept[k].index].wid;
+    uint32_t skip[2 * SUNBEAM_LIMIT + 1] = { wid };
+    int skip_count = 1;
+    for (int k = 0; k < kept_count; ++k) skip[skip_count++] = saved[kept[k].index].wid;
+    for (int i = 0; i < count; ++i) if (pinned[i]) skip[skip_count++] = saved[i].wid;
     if (transaction) {
         // The levels directly, before the transaction, bottom up in the order wanted (sunlight-19): in
         // a transaction an order against a window whose level changes in it can do nothing, and which
@@ -1286,20 +1449,24 @@ static void sunbeam_handoff_apply(CFTypeRef transaction, uint32_t wid, CGPoint p
         // what came down before it and under what is still up. The transaction then moves, orders and
         // transforms among windows whose levels are final.
         for (int i = 0; i < count; ++i) {
-            bool on_show = i == entered;
+            bool on_show = i == entered || pinned[i];
             for (int k = 0; k < kept_count; ++k) if (kept[k].index == i) on_show = true;
             if (!on_show && sunbeam_owner_matches(&saved[i])) sunbeam_level(NULL, cid, saved[i].wid, saved[i].level, changed);
         }
-        // The canvas stays up (sunlight-27); the windows on show go above it.
+        // The canvas stays up (sunlight-27); the windows on show go above it, the pinned ones over all.
+        // The pinned ones first (sunlight-52): raised after the entered window, a tile under the spot that
+        // window takes was covered by it for the frame between the two calls, and blinked on every
+        // switch; raised before it, it is over everything from the first call, which is where it ends up.
         if (backdrop) sunbeam_level(NULL, cid, backdrop, SUNBEAM_LEVEL, changed);
         if (canvas_overlay) sunbeam_level(NULL, cid, canvas_overlay, SUNBEAM_LEVEL, changed);
+        for (int i = 0; i < count; ++i) if (pinned[i]) sunbeam_level(NULL, cid, saved[i].wid, SUNBEAM_PINNED, changed);
         for (int k = 0; k < kept_count; ++k) sunbeam_level(NULL, cid, saved[kept[k].index].wid, SUNBEAM_FRONT, changed);
         sunbeam_level(NULL, cid, wid, SUNBEAM_FRONT, changed);
         // The windows put back, their places (their levels are final; `sunbeam_restore` sets no level twice).
         for (int i = count - 1; i >= 0; --i) {
-            bool on_show = i == entered;
+            bool on_show = i == entered || pinned[i];
             for (int k = 0; k < kept_count; ++k) if (kept[k].index == i) on_show = true;
-            if (!on_show) sunbeam_restore(transaction, &saved[i], backdrop, overlay, &anchor, skip, kept_count + 1, false);
+            if (!on_show) sunbeam_restore(transaction, &saved[i], backdrop, overlay, &anchor, skip, skip_count, false);
         }
         // The moves before any order (sunlight-17): a kept window moved after its order came out above
         // the entered window, full-size over it for the frames until the app's activation put it under
@@ -1311,9 +1478,9 @@ static void sunbeam_handoff_apply(CFTypeRef transaction, uint32_t wid, CGPoint p
         }
     } else {
         for (int i = count - 1; i >= 0; --i) {
-            bool on_show = i == entered;
+            bool on_show = i == entered || pinned[i];
             for (int k = 0; k < kept_count; ++k) if (kept[k].index == i) on_show = true;
-            if (!on_show) sunbeam_restore(NULL, &saved[i], backdrop, overlay, &anchor, skip, kept_count + 1, true);
+            if (!on_show) sunbeam_restore(NULL, &saved[i], backdrop, overlay, &anchor, skip, skip_count, true);
         }
         if (move) sunbeam_move(NULL, cid, wid, point);
         sunbeam_transform(NULL, cid, wid, settled);
@@ -1323,6 +1490,7 @@ static void sunbeam_handoff_apply(CFTypeRef transaction, uint32_t wid, CGPoint p
         }
         if (backdrop) sunbeam_level(NULL, cid, backdrop, SUNBEAM_LEVEL, changed);
         if (canvas_overlay) sunbeam_level(NULL, cid, canvas_overlay, SUNBEAM_LEVEL, changed);
+        for (int i = 0; i < count; ++i) if (pinned[i]) sunbeam_level(NULL, cid, saved[i].wid, SUNBEAM_PINNED, changed);   // first, as above
         for (int k = 0; k < kept_count; ++k) sunbeam_level(NULL, cid, saved[kept[k].index].wid, SUNBEAM_FRONT, changed);
         sunbeam_level(NULL, cid, wid, SUNBEAM_FRONT, changed);
     }
@@ -1379,6 +1547,11 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
     int wid_level = 0;
     if (entered >= 0) wid_level = saved[entered].level;
     else if (SLSGetWindowLevel(cid, wid, &wid_level) != kCGErrorSuccess) wid_level = 0;
+    // The ones pinned to the screen (sunlight-42): leased, not the one entered, they stay as they are.
+    bool pinned[SUNBEAM_LIMIT];
+    for (int i = 0; i < count; ++i) {
+        pinned[i] = overlay && i != entered && sunbeam_is_pinned(state, saved[i].wid) && sunbeam_owner_matches(&saved[i]);
+    }
     // The ones kept on show: moved natively in the transaction too, or now where there is none.
     struct sunbeam_kept kept[SUNBEAM_LIMIT];
     int kept_count = 0;
@@ -1387,7 +1560,7 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
         memcpy(&kid, keep + k * 12, 4); memcpy(&kx, keep + k * 12 + 4, 4); memcpy(&ky, keep + k * 12 + 8, 4);
         int index = -1;
         for (int i = 0; i < count; ++i) if (saved[i].wid == kid && i != entered) index = i;
-        if (index < 0 || !sunbeam_owner_matches(&saved[index])) continue;
+        if (index < 0 || pinned[index] || !sunbeam_owner_matches(&saved[index])) continue;
         bool twice = false;
         for (int j = 0; j < kept_count; ++j) if (kept[j].index == index) twice = true;
         if (twice) continue;
@@ -1410,12 +1583,13 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
     if (ov) {
         sunbeam_lifted_add(wid, wid_level, ov);
         for (int k = 0; k < kept_count; ++k) sunbeam_lifted_add(saved[kept[k].index].wid, saved[kept[k].index].level, ov);
+        for (int i = 0; i < count; ++i) if (pinned[i]) sunbeam_lifted_add(saved[i].wid, saved[i].level, ov);
     }
     uint32_t anchor = bd;
     bool changed = false, transacted = false;
     for (int attempt = 0; attempt < 2; ++attempt) {
         CFTypeRef transaction = attempt == 0 ? sunbeam_transaction_begin(cid) : NULL;
-        sunbeam_handoff_apply(transaction, wid, point, move, settled, overlay, ov, bd, saved, count, entered, kept, kept_count, anchor, &changed);
+        sunbeam_handoff_apply(transaction, wid, point, move, settled, overlay, ov, bd, saved, count, entered, kept, kept_count, pinned, anchor, &changed);
         transacted = transaction != NULL;
         if (sunbeam_transaction_end(transaction)) break;
     }
@@ -1431,6 +1605,9 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
         sunbeam_place_later(wid, owner, point, drawn);
         for (int k = 0; k < kept_count; ++k) sunbeam_place_later(saved[kept[k].index].wid, saved[kept[k].index].owner, kept[k].point, kept[k].drawn);
     }
+    // Its full shape back (sunlight-52), should the canvas not have asked for it before the handoff: a
+    // window used at 1:1 has its own corners.
+    sunbeam_shape_reset(wid);
     // Levels changed in a transaction: the orders once more, directly, in case the window server took
     // them before the levels (see `sunbeam_release_all`). A no-op when it didn't.
     if (changed) {
@@ -1438,24 +1615,78 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
         uint32_t above = wid;
         for (int k = kept_count - 1; k >= 0; --k) { sunbeam_order(NULL, cid, saved[kept[k].index].wid, -1, above); above = saved[kept[k].index].wid; }
         if (overlay && bd) sunbeam_order(NULL, cid, bd, -1, overlay);
-        uint32_t skip[SUNBEAM_LIMIT + 1] = { wid };
-        for (int k = 0; k < kept_count; ++k) skip[k + 1] = saved[kept[k].index].wid;
+        uint32_t skip[2 * SUNBEAM_LIMIT + 1] = { wid };
+        int skip_count = 1;
+        for (int k = 0; k < kept_count; ++k) skip[skip_count++] = saved[kept[k].index].wid;
+        for (int i = 0; i < count; ++i) if (pinned[i]) skip[skip_count++] = saved[i].wid;
         uint32_t redo_anchor = bd;
         for (int i = count - 1; i >= 0; --i) {
-            bool on_show = i == entered;
+            bool on_show = i == entered || pinned[i];
             for (int k = 0; k < kept_count; ++k) if (kept[k].index == i) on_show = true;
-            if (!on_show) sunbeam_restore(NULL, &saved[i], bd, ov, &redo_anchor, skip, kept_count + 1, false);
+            if (!on_show) sunbeam_restore(NULL, &saved[i], bd, ov, &redo_anchor, skip, skip_count, false);
         }
     }
     // The windows put back go to native size only now, under the backdrop (see `sunbeam_restore`).
     if (transacted) {
         for (int i = count - 1; i >= 0; --i) {
-            bool on_show = i == entered;
+            bool on_show = i == entered || pinned[i];
             for (int k = 0; k < kept_count; ++k) if (kept[k].index == i) on_show = true;
             if (!on_show) sunbeam_settle_later(&saved[i], bd, top);
         }
     }
     return true;
+}
+
+// MARK: Anchor
+
+/// A leased window's real frame to a native origin, its picture unmoved (sunlight-56). The request:
+/// the window and the origin (two floats, global top-left). The move and the transform in force go in
+/// one transaction, the transform after the move: the window server takes a transform against the
+/// native origin the window has when it is set, so a move alone shifts the picture by the move (the
+/// handoff's moves go the same way, `sunbeam_moves_in_transaction`). For an app that reads the raw
+/// pointer against its real frame (`NSEvent.mouseLocation`: Preview's zoom around the pointer), which
+/// the canvas puts under the pointer as a gesture starts; the picture is where the transform draws it,
+/// so the real frame isn't clamped under the menu bar here. The answer carries where the window landed
+/// (the window server or its app may clamp a move), so the canvas's record of its real frame is right.
+/// The lease's record of the window's own transform follows the move (sunlight-57), so a release puts
+/// it back where it now is. Status 1 for a request that makes no sense, 25 for a window this lease
+/// doesn't hold, 3 when the transform couldn't be set directly (a transaction's code says nothing, see
+/// `sunbeam_transaction_end`).
+static uint8_t sunbeam_anchor_set(const char *bytes, int length, struct sunbeam_saved *saved, int count, CGPoint *landed)
+{
+    *landed = CGPointZero;
+    if (length != 12) return 1;
+    uint32_t wid; float x, y;
+    memcpy(&wid, bytes, 4); memcpy(&x, bytes + 4, 4); memcpy(&y, bytes + 8, 4);
+    if (!wid || !isfinite(x) || !isfinite(y) || fabsf(x) > 1e6f || fabsf(y) > 1e6f) return 1;
+    struct sunbeam_saved *entry = NULL;
+    for (int i = 0; i < count && !entry; ++i) if (saved[i].wid == wid) entry = &saved[i];
+    if (!entry || !sunbeam_owner_matches(entry)) return 25;
+    int cid = SLSMainConnectionID();
+    CGPoint point = CGPointMake(x, y);
+    CGAffineTransform t = entry->has_applied ? entry->applied : entry->transform;
+    CFTypeRef transaction = sunbeam_moves_in_transaction() ? sunbeam_transaction_begin(cid) : NULL;
+    uint8_t status = 0;
+    if (transaction) {
+        sunbeam_move(transaction, cid, wid, point);
+        sunbeam_transform(transaction, cid, wid, t);
+        sunbeam_transaction_end(transaction);
+    } else {
+        SLSDisableUpdate(cid);
+        SLSMoveWindowWithGroup(cid, wid, &point);
+        if (SLSSetWindowTransform(cid, wid, t) != kCGErrorSuccess) status = 3;
+        SLSReenableUpdate(cid);
+    }
+    CGRect frame;
+    *landed = SLSGetWindowBounds(cid, wid, &frame) == kCGErrorSuccess ? frame.origin : point;
+    // The window's own transform, put back when the lease lets it go (`sunbeam_settle`, `sunbeam_restore`),
+    // is the native one where the lease found it: a translation to minus that origin. The window lives
+    // at the new origin now, so that is what it goes back to (sunlight-57); with the old one a window let
+    // go at a zoom was drawn at its old place while its app had it at the new one.
+    if (fabs(entry->transform.a - 1) < 1e-3 && fabs(entry->transform.d - 1) < 1e-3) {
+        entry->transform = CGAffineTransformMakeTranslation(-landed->x, -landed->y);
+    }
+    return status;
 }
 
 // MARK: Session
@@ -1501,6 +1732,36 @@ static void *sunbeam_session(void *context)
         } else if ((uint8_t)bytes[0] == SUNBEAM_ALPHA && length >= 2) {
             // Cosmetic too: answered with its status, the lease goes on.
             uint8_t status = sunbeam_alpha_set(bytes + 1, length - 1, saved, count);
+            pthread_mutex_unlock(&sunbeam_lock);
+            if (send(fd, &status, 1, 0) != 1) break;
+            continue;
+        } else if ((uint8_t)bytes[0] == SUNBEAM_SHAPE && length == 9) {
+            // A tile's rounded corners (sunlight-52): cosmetic, answered with its status, the lease goes on.
+            uint8_t status = sunbeam_shape_set(bytes + 1, length - 1);
+            pthread_mutex_unlock(&sunbeam_lock);
+            if (send(fd, &status, 1, 0) != 1) break;
+            continue;
+        } else if ((uint8_t)bytes[0] == SUNBEAM_ANCHOR && length == 13) {
+            // A leased window's real frame under the pointer (sunlight-56): answered with its status and
+            // where the window landed (two floats); the lease goes on.
+            CGPoint landed;
+            uint8_t answer[9];
+            answer[0] = sunbeam_anchor_set(bytes + 1, length - 1, saved, count, &landed);
+            float lx = (float)landed.x, ly = (float)landed.y;
+            memcpy(answer + 1, &lx, 4); memcpy(answer + 5, &ly, 4);
+            pthread_mutex_unlock(&sunbeam_lock);
+            if (send(fd, answer, 9, 0) != 9) break;
+            continue;
+        } else if ((uint8_t)bytes[0] == SUNBEAM_PIN && length >= 2) {
+            // The windows pinned to the screen (sunlight-42): a count, then that many IDs. Replaces the
+            // last list; the lease goes on either way, with the old list if this one makes no sense.
+            int n = (uint8_t)bytes[1];
+            uint8_t status = 1;
+            if (length == 2 + n * 4 && n <= SUNBEAM_LIMIT) {
+                memcpy(state.pinned, bytes + 2, n * 4);
+                state.pinned_count = n;
+                status = 0;
+            }
             pthread_mutex_unlock(&sunbeam_lock);
             if (send(fd, &status, 1, 0) != 1) break;
             continue;
@@ -1551,7 +1812,7 @@ static void *sunbeam_session(void *context)
     }
 done:
     pthread_mutex_lock(&sunbeam_lock);
-    sunbeam_release_all(saved, count, state.backdrop, state.overlay, 0, state.top);
+    sunbeam_release_all(saved, count, state.backdrop, state.overlay, 0, state.top, &state);
     --sunbeam_sessions;
     pthread_mutex_unlock(&sunbeam_lock);
     shutdown(fd, SHUT_RDWR); close(fd);

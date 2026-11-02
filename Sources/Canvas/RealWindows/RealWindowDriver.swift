@@ -32,6 +32,14 @@ final class RealWindowDriver: @unchecked Sendable {
     private var partialFramesInDock: Bool { LiveWindowsWire.partialFramesInDock(additionVersion) }
     private var liftsCanvasInDock: Bool { LiveWindowsWire.liftsCanvasInDock(additionVersion) }
     private var alphaInDock: Bool { LiveWindowsWire.alphaInDock(additionVersion) }
+    private var pinsInDock: Bool { LiveWindowsWire.pinsInDock(additionVersion) }
+    private var shapesInDock: Bool { LiveWindowsWire.shapesInDock(additionVersion) }
+    private var anchorsInDock: Bool { LiveWindowsWire.anchorsInDock(additionVersion) }
+    /// An anchor request the add-on answered with a status, logged once.
+    private var anchorDeclinedLogged = false
+    /// A shape request the add-on answered with a status, logged once; the rest are still sent (a window
+    /// gone by the time the request lands answers the same, and the next tile may well be shaped).
+    private var shapeDeclinedLogged = false
     /// A shadow request the add-on answered with a status: logged once per lease, then no more are
     /// sent on it. Shadows are cosmetic; the frames go on. Worker only.
     private var shadowDeclined = false
@@ -98,6 +106,68 @@ final class RealWindowDriver: @unchecked Sendable {
             }
         } catch {
             NSLog("Rendering: an alpha request failed (\(error.localizedDescription))")
+        }
+    }
+
+    /// The windows pinned to the screen, on the lease in hand, when the add-on keeps pins (sunlight-42).
+    /// A refusal is logged; the handoff or release behind it goes on. Worker only.
+    private func sendPins(_ pinned: [CGWindowID], on leased: LiveWindowsConnection) {
+        guard !pinned.isEmpty, pinsInDock else { return }
+        do {
+            let status = try leased.request(LiveWindowsWire.pin(pinned))
+            if status != 0 { NSLog("Rendering: the add-on declined the pinned windows (\(LiveWindowsConnection.reason(for: status))); they show only while the canvas is up") }
+        } catch {
+            NSLog("Rendering: the pin request failed (\(error.localizedDescription))")
+        }
+    }
+
+    /// A window's corner radius (`LiveWindowsWire.shape`), on the lease in hand or one taken for it and
+    /// given up again: a tile stays on show while the canvas is away, when nothing is leased. Cosmetic: a
+    /// refusal is logged once and nothing else changes.
+    func shape(_ id: CGWindowID, radius: Float) {
+        queue.async { [self] in
+            let fresh = connection == nil
+            if let leased = try? lease(), shapesInDock {
+                do {
+                    let status = try leased.request(LiveWindowsWire.shape(id, radius: radius))
+                    if status != 0, !shapeDeclinedLogged {
+                        shapeDeclinedLogged = true
+                        NSLog("Rendering: the add-on declined a shape request (\(LiveWindowsConnection.reason(for: status))); tiles keep their windows' corners")
+                    }
+                } catch {
+                    NSLog("Rendering: a shape request failed (\(error.localizedDescription))")
+                }
+            }
+            if fresh { connection?.close(); connection = nil }
+        }
+    }
+
+    /// A leased window's real frame to `origin` (global, top-left), its picture unmoved
+    /// (`LiveWindowsWire.anchor`, sunlight-56), on the lease in hand; nothing without one. `landed` is
+    /// called on main with where the window server put it, or nil when the add-on declined or the
+    /// request failed (logged once; nothing else changes).
+    func anchor(_ id: CGWindowID, at origin: CGPoint, landed: @escaping @MainActor @Sendable (CGPoint?) -> Void) {
+        queue.async { [self] in
+            var result: CGPoint?
+            if let leased = connection, anchorsInDock {
+                do {
+                    try leased.send(LiveWindowsWire.anchor(id, x: Float(origin.x), y: Float(origin.y)))
+                    let reply = try leased.receive(9)
+                    let status = reply[0]
+                    if status == 0 {
+                        let x = reply.subdata(in: 1..<5).withUnsafeBytes { $0.loadUnaligned(as: Float.self) }
+                        let y = reply.subdata(in: 5..<9).withUnsafeBytes { $0.loadUnaligned(as: Float.self) }
+                        result = CGPoint(x: CGFloat(x), y: CGFloat(y))
+                    } else if !anchorDeclinedLogged {
+                        anchorDeclinedLogged = true
+                        NSLog("Rendering: the add-on declined an anchor request (\(LiveWindowsConnection.reason(for: status))); the app's own zoom anchors on the real frame")
+                    }
+                } catch {
+                    NSLog("Rendering: an anchor request failed (\(error.localizedDescription))")
+                }
+            }
+            let point = result
+            DispatchQueue.main.async { MainActor.assumeIsolated { landed(point) } }
         }
     }
 
@@ -208,9 +278,12 @@ final class RealWindowDriver: @unchecked Sendable {
     /// and an older one puts them back with the rest.
     /// `above`: with no handoff, the app that took the front while the canvas was up (the canvas is
     /// deactivating for it), if any: an add-on from sunlight-11 brings the canvas down under its windows.
+    /// `pinned`: the windows pinned to the screen, told to the add-on first (sunlight-42): leased, they stay
+    /// on show as they are through the handoff, or the release for the app in front, above everything.
     @discardableResult
     func restore(handoff: (CGWindowID, CGPoint)? = nil, overlay: CGWindowID = 0, backdrop: CGWindowID = 0,
-                 shadow: Data? = nil, keeping kept: [(CGWindowID, CGPoint)] = [], top: CGFloat? = nil, above: pid_t = 0) -> Bool {
+                 shadow: Data? = nil, keeping kept: [(CGWindowID, CGPoint)] = [], top: CGFloat? = nil, above: pid_t = 0,
+                 pinned: [CGWindowID] = []) -> Bool {
         lock.lock(); generation += 1; pending = nil; pendingAlpha = [:]; scheduled = false; lock.unlock()
         return queue.sync {
             defer { connection?.close(); connection = nil }
@@ -221,6 +294,7 @@ final class RealWindowDriver: @unchecked Sendable {
                 guard let (id, point) = handoff else {
                     // Nothing leased, nothing to put back.
                     if let connection {
+                        sendPins(pinned, on: connection)
                         try connection.acknowledge(LiveWindowsWire.snapshot([], backdrop: handoffInDock ? backdrop : 0,
                                                                       overlay: handoffInDock ? overlay : 0,
                                                                       kind: partialFramesInDock ? .full : .legacy,
@@ -236,6 +310,7 @@ final class RealWindowDriver: @unchecked Sendable {
                 }
                 let leased = try lease()
                 if let shadow { sendShadow(shadow, on: leased) }
+                sendPins(pinned, on: leased)
                 if handoffInDock {
                     let keeping = LiveWindowsWire.keepsWindowsInDock(additionVersion) ? kept : []
                     let top = LiveWindowsWire.clampsNatively(additionVersion) ? top : nil

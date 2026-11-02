@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings › Trackpad: every gesture the canvas answers, shown the way System Settings › Trackpad
+/// Settings › How to use › Trackpad: every gesture the canvas answers, shown the way System Settings › Trackpad
 /// shows the Mac's. Pick one (or point at it) and a loop acts it out: fingertips on a trackpad beside
 /// a miniature canvas doing what the gesture does. A loop is a pure function of time (`frame`), so the
 /// views only draw it and the tests can read it.
@@ -19,16 +19,16 @@ enum GestureGuide {
             }
         }
 
-        /// The gestures in this tab, with See All shown the way Settings › Trackpad has it.
+        /// The gestures in this tab, with See All shown the way Settings › How to use has it.
         func gestures(seeAll: Settings.SeeAllGesture) -> [Gesture] {
             Gesture.allCases.filter { $0.group == self && $0 != (seeAll == .tap ? .swipeUp : .fourFingerTap) }
         }
 
         var footer: String? {
             switch self {
-            case .pointAndClick: return "Clicks go to the window itself once it's at 1:1, as on the desktop."
+            case .pointAndClick: return "At 1:1, clicks go to the window."
             case .zoomAndPan: return "⌥ or ⌘ with a scroll zooms too, for a mouse."
-            case .more: return "While Sunlight runs, four-finger swipes are its own: Mission Control, Spaces and Launchpad don't see them. Five fingers are left to the Mac."
+            case .more: return "Sunlight takes four-finger swipes. Five fingers still go to the Mac."
             }
         }
     }
@@ -84,17 +84,17 @@ enum GestureGuide {
         /// The longer story, under the picture.
         var line: String {
             switch self {
-            case .click: return "Zoomed in or out, the window comes to 1:1 right where it sits, at its own size, and you're in it."
-            case .doubleClick: return "The window flies to the middle of the screen and you're in it. ⏎ does the same for the window under the pointer."
-            case .drag: return "Edges stick to the neighbours'. Dragging the empty canvas pans it; ⌘-drag places a window freely."
-            case .secondaryClick: return "Move & Resize and the rest for the window under the pointer, or placement for the canvas."
-            case .pinch: return "Zooms about the point between your fingers, and tails off when they lift."
-            case .pinchIn: return "Zoom in until the window fills the screen and it's yours, right where it sits."
-            case .scroll: return "The canvas follows your fingers. At 1:1 over a window, the window scrolls instead."
-            case .fourFingerDrag: return "Any direction, over windows and from inside one too: the canvas comes back and follows your fingers."
-            case .fourFingerTap: return "From a window, the canvas with every window in view, as Mission Control does. Tapped again on the canvas, it goes back into the window you came from."
-            case .swipeUp: return "A quick stroke up, as for Mission Control: the canvas with every window in view. Again on the canvas, it goes back into the window you came from. A slow drag up pans."
-            case .spread: return "The windows move aside for Finder's desktop. F11 does the same."
+            case .click: return "The window comes to 1:1 where it sits."
+            case .doubleClick: return "The window flies to the middle. ⏎ does the same."
+            case .drag: return "Edges line up. ⌘-drag to place freely."
+            case .secondaryClick: return "Window options, or canvas options."
+            case .pinch: return "Zooms around your fingers."
+            case .pinchIn: return "Zoom into a window to use it."
+            case .scroll: return "Moves the canvas. At 1:1, scrolls the window."
+            case .fourFingerDrag: return "Pans from anywhere, even inside a window."
+            case .fourFingerTap: return "See every window. Tap again to go back."
+            case .swipeUp: return "See every window. Swipe again to go back."
+            case .spread: return "Shows the desktop. So does F11."
             }
         }
 
@@ -439,7 +439,7 @@ struct MiniCanvasPicture: View {
                 : [(GestureGuide.acted, true)] + GestureGuide.others.map { ($0, false) }
             for (unit, isActed) in windows {
                 let r = place(frame.camera.screen(GestureGuide.rect(unit, acted: isActed, in: frame)))
-                drawWindow(r, acted: isActed, in: &ctx)
+                Self.drawWindow(r, acted: isActed, in: &ctx)
             }
 
             if frame.menu > 0, let pointer = frame.pointer {
@@ -455,12 +455,13 @@ struct MiniCanvasPicture: View {
                 }
             }
 
-            if let pointer = frame.pointer { drawPointer(at: place(pointer), in: &ctx) }
+            if let pointer = frame.pointer { Self.drawPointer(at: place(pointer), in: &ctx) }
         }
     }
 
-    /// A window: white, a title bar with its three dots, the acted one's bar in the sun's colour.
-    private func drawWindow(_ r: CGRect, acted: Bool, in ctx: inout GraphicsContext) {
+    /// A window: white, a title bar with its three dots, the acted one's bar in the sun's colour. Also
+    /// the windows on Settings' stages and tiles (`SettingsPictures`).
+    static func drawWindow(_ r: CGRect, acted: Bool, in ctx: inout GraphicsContext) {
         let corner = min(max(r.width * 0.05, 2), 7)
         let shape = Path(roundedRect: r, cornerRadius: corner, style: .continuous)
         var shadowed = ctx
@@ -493,7 +494,7 @@ struct MiniCanvasPicture: View {
     }
 
     /// The Mac's arrow, black with a white edge.
-    private func drawPointer(at p: CGPoint, in ctx: inout GraphicsContext) {
+    static func drawPointer(at p: CGPoint, in ctx: inout GraphicsContext) {
         var arrow = Path()
         arrow.move(to: CGPoint(x: 0, y: 0))
         arrow.addLine(to: CGPoint(x: 0, y: 13))
@@ -557,7 +558,7 @@ struct TrackpadPicture: View {
     }
 }
 
-/// Settings › Trackpad: the three tabs of gestures, and the picture acting out the one picked or pointed
+/// Settings › How to use: the three tabs of gestures, and the picture acting out the one picked or pointed
 /// at, as in System Settings › Trackpad.
 struct TrackpadPane: View {
     @State private var group: GestureGuide.Group = .pointAndClick
@@ -628,9 +629,9 @@ struct TrackpadPane: View {
                 .labelsHidden()
             } header: {
                 SectionHeader(title: "See everything",
-                              detail: "Which four-finger gesture shows the whole canvas, and goes back into the last window when done again on the canvas, as the Mission Control key does.")
+                              detail: "The four-finger gesture that shows every window.")
             } footer: {
-                Text("A tap leaves every four-finger drag a pan, up included. A swipe up is Mission Control's own gesture, but a quick upward stroke then shows everything instead of panning; a slow drag up still pans.")
+                Text("With swipe up, a slow drag up still pans.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -140,10 +140,17 @@ struct Spring {
     var response: CGFloat = Spring.response
     var damping: CGFloat = Spring.damping
 
-    /// Offset and velocity `t` seconds in.
+    /// Offset and velocity `t` seconds in. A damping of 1 or more is the critically damped spring (no
+    /// overshoot, the quickest settle without one): the under-damped form divides by zero there, and the
+    /// tile's tuck ran on it, so the first tick was NaN and Core Animation threw on the label's position.
     func evaluate(at t: CGFloat) -> (x: CGFloat, v: CGFloat) {
         let ω = 2 * CGFloat.pi / response
         let ζ = damping
+        if ζ >= 1 {
+            let b = v0 + ω * x0
+            let decay = exp(-ω * t)
+            return ((x0 + b * t) * decay, (b - ω * (x0 + b * t)) * decay)
+        }
         let ωd = ω * sqrt(1 - ζ * ζ)
         let decay = exp(-ζ * ω * t)
         let a = x0

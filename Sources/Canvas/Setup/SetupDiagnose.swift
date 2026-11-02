@@ -32,6 +32,8 @@ enum SetupDiagnose {
         var system: String
         var mac: SetupFlow.Mac
         var status: SetupStatus
+        /// `StageManager.describeCurrent()`: Sunlight needs it off.
+        var stageManager = "off"
         /// The `--renderer-status` lines about the renderer.
         var renderer: String
         /// What `SunlightLiveWindows status` prints, or why it couldn't be asked.
@@ -39,6 +41,8 @@ enum SetupDiagnose {
         var inputs: Inputs
         var journal: String
         var date: Date
+        /// `desktopsLine`: how many Desktops there are, per display.
+        var desktops = ""
     }
 
     static let journalLines = 80
@@ -58,8 +62,10 @@ enum SetupDiagnose {
         lines.append(contentsOf: setupLines(facts.status))
         let progress = SetupFlow.progress(for: facts.status, mac: facts.mac)
         lines.append("Progress: \(progress.done) of \(progress.total) steps")
+        lines.append("Stage Manager: \(facts.stageManager)")
         lines.append("Wizard: " + wizardSummary(facts.inputs))
         lines.append("Preview mode: \(facts.inputs.previewMode ? "on" : "off")")
+        if !facts.desktops.isEmpty { lines.append("Desktops: \(facts.desktops)") }
         lines.append("")
         lines.append("== Renderer ==")
         lines.append(facts.renderer)
@@ -92,6 +98,25 @@ enum SetupDiagnose {
         if let resume = inputs.record.resume { parts.append("resuming at \(resume.rawValue)") }
         parts.append(inputs.opensAtLaunch ? "opens at launch" : "doesn't open at launch")
         return parts.joined(separator: ", ")
+    }
+
+    /// "1 on each of 2 displays", "3 (2 on one display, 1 on the other), 1 full-screen app": takeover
+    /// keeps one Desktop per display, so more says folding hasn't happened.
+    static func desktopsLine(_ displays: [Spaces.Display]) -> String {
+        guard !displays.isEmpty else { return "unknown (SkyLight didn't say)" }
+        let counts = displays.map { $0.desktops.count }
+        let total = counts.reduce(0, +)
+        var line: String
+        if displays.count == 1 {
+            line = "\(total) on 1 display"
+        } else if Set(counts).count == 1 {
+            line = "\(counts[0]) on each of \(displays.count) displays"
+        } else {
+            line = "\(total) (\(counts.map(String.init).joined(separator: " + ")) on \(displays.count) displays)"
+        }
+        let fullScreen = displays.reduce(0) { $0 + $1.spaces.filter { $0.kind == .fullScreen }.count }
+        if fullScreen > 0 { line += ", \(fullScreen) full-screen app Space\(fullScreen == 1 ? "" : "s")" }
+        return line
     }
 
     static func journalTail(_ journal: String) -> String {
@@ -170,10 +195,12 @@ enum SetupDiagnose {
                      system: "macOS " + ProcessInfo.processInfo.operatingSystemVersionString.replacingOccurrences(of: "Version ", with: ""),
                      mac: SetupFlow.Mac.current(),
                      status: SetupStatus.current(),
+                     stageManager: StageManager.describeCurrent(),
                      renderer: rendererStatus(preferred: inputs.preferredRenderer, wantsLiveWindows: inputs.wantsLiveWindows,
                                               available: available, previewMode: inputs.previewMode, reload: reloadDescription()),
                      helper: helperStatus(),
-                     inputs: inputs, journal: SetupJournal.read(), date: Date())
+                     inputs: inputs, journal: SetupJournal.read(), date: Date(),
+                     desktops: desktopsLine(Spaces.read()))
     }
 
     /// Where a report goes: beside the setup journal, named by the minute.

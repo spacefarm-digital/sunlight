@@ -347,6 +347,9 @@ final class UninstallController: NSWindowController, NSWindowDelegate {
         case .helper:
             var text = "Turns Sunlight off in System Settings › General › Login Items: the background helper that loaded live windows, and opening at login."
             if status.takeoverApplied { text += " Puts the Dock, Finder and Mission Control back as they were before Sunlight took over the Mac." }
+            if UserDefaults.standard.bool(forKey: TakeoverMode.Keys.merged) {
+                text += " Desktops Sunlight merged into the canvas are not recreated: add them again in Mission Control if you want them."
+            }
             views.append(Self.text(text))
             buttons.append(button("Turn Off", id: "turnoff", enabled: !busy.contains(.helper)) { [weak self] in self?.turnOffHelper() })
 

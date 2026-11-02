@@ -17,13 +17,20 @@ struct BackgroundSettingsView: View {
             Section {
                 sourceRow
                 if model.spec.isPlainColor { colourRow }
-                Picker(selection: Binding(get: { model.appearance }, set: { model.setAppearance($0) })) {
-                    ForEach(BackgroundModel.appearances, id: \.self) { Text($0.title) }
-                } label: {
+                VStack(alignment: .leading, spacing: 6) {
                     RowLabel(title: "Appearance",
-                             subtitle: "Match the Mac follows System Settings › Appearance, Auto’s schedule included.")
+                             subtitle: "Match the Mac follows System Settings.")
+                    TileRow {
+                        ForEach(BackgroundModel.appearances, id: \.self) { appearance in
+                            PictureTile(title: appearance.title, selected: model.appearance == appearance) {
+                                model.setAppearance(appearance)
+                            } picture: {
+                                AppearancePicture(appearance: appearance)
+                            }
+                        }
+                    }
                 }
-                .pickerStyle(.segmented)
+                .accessibilityElement(children: .contain)
             } header: {
                 SectionHeader(title: "Source")
             }
@@ -42,7 +49,7 @@ struct BackgroundSettingsView: View {
                         .pickerStyle(.segmented)
                         Toggle(isOn: binding(\.focusFollowsZoom)) {
                             RowLabel(title: "Blur and dim follow the zoom",
-                                     subtitle: "Sharp at 100%, where the canvas is your desk; blurred and dimmed when you pull back.")
+                                     subtitle: "Blurs and dims as you zoom out.")
                         }
                         LabeledContent(model.spec.focusFollowsZoom ? "Dim when zoomed out" : "Dim") {
                             Slider(value: Binding(get: { model.spec.dim },
@@ -51,7 +58,7 @@ struct BackgroundSettingsView: View {
                                 .frame(maxWidth: 220)
                         }
                         Toggle(isOn: binding(\.depth)) {
-                            RowLabel(title: "Subtle depth", subtitle: "The picture drifts a little as you pan. Off with Reduce Motion.")
+                            RowLabel(title: "Subtle depth", subtitle: "The picture drifts as you pan.")
                         }
                     } header: {
                         SectionHeader(title: "Focus")
@@ -67,7 +74,7 @@ struct BackgroundSettingsView: View {
                         if model.spec.source.isGradient {
                             Toggle(isOn: binding(\.living)) {
                                 RowLabel(title: "Living gradient",
-                                         subtitle: "Drifts slowly while the canvas is in front. Rests with Reduce Motion and Low Power Mode.")
+                                         subtitle: "Drifts slowly. Rests in Low Power Mode.")
                             }
                         }
                         if case .image(_, let dark) = model.spec.source {
@@ -79,8 +86,8 @@ struct BackgroundSettingsView: View {
                                 }
                             } label: {
                                 RowLabel(title: "Dark appearance",
-                                         subtitle: dark == nil ? "The same picture, dimmed a little, when the Mac is dark."
-                                                               : "A picture of its own when the Mac is dark.")
+                                         subtitle: dark == nil ? "Dims the same picture in Dark Mode."
+                                                               : "Its own picture in Dark Mode.")
                             }
                         }
                     }
@@ -151,7 +158,7 @@ struct BackgroundSettingsView: View {
                                                        set: { model.setDarkColor(NSColor($0)) }), supportsOpacity: false)
             }
         } label: {
-            RowLabel(title: "Colour", subtitle: "One for a light Mac, one for a dark one.")
+            RowLabel(title: "Colour", subtitle: "One for light, one for dark.")
         }
     }
 

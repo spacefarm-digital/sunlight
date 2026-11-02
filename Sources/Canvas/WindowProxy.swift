@@ -51,6 +51,26 @@ final class WindowProxy {
     /// Leaving the canvas through a close effect: held at its last frame until the listing drops it.
     var closing = false
 
+    /// In Picture in Picture (`PictureInPicture`): a tile in a corner of the screen whatever the camera
+    /// does, on show while the canvas is away too. Its place on the canvas (`worldRect`) stands: its home,
+    /// which it goes back to when PiP ends. The controller sets it; the view draws it through `effect`.
+    var pip: PipFrame? {
+        didSet { if (pip == nil) != (oldValue == nil) { refreshLabel() } }
+    }
+    /// What is drawn while the tile is on its way somewhere (into its corner, back to 1:1, home); the
+    /// tile itself otherwise.
+    var pipShown: PipFrame?
+    var drawnPip: PipFrame? { pipShown ?? pip }
+    /// The screen edge the tile is tucked away behind, with only its tab showing.
+    var pipTucked: PictureInPicture.Side?
+    /// The corner it was last in, for the next time it goes into Picture in Picture.
+    var lastPipCorner: PictureInPicture.Corner?
+    /// The tile in world units at the camera now, set by `CanvasView.applyCamera` for a window in PiP:
+    /// what its chrome is laid out from and what a press hits.
+    var pipWorldRect: CGRect?
+    /// Where the window is seen on the canvas: its tile while in PiP, its home otherwise.
+    var apparentRect: CGRect { pipWorldRect ?? worldRect }
+
     /// Where the window lives on the canvas (top-left world coords, points). A widget's is its card.
     /// The layers follow it on their own; nothing else has to remember to lay out after a move.
     ///
@@ -268,9 +288,14 @@ final class WindowProxy {
     /// Dock animates it, but taking no hover and showing no controls over the animation.
     var leaving = false
 
+    /// The hover border at two screen points, through the zoom and whatever the effect scales the layer by.
+    private var hoverBorderWidth: CGFloat {
+        2 / (lastZoom * (effect.keepsGeometry ? 1 : max(effect.scale.width, 0.001)))
+    }
+
     var hovered = false {
         didSet {
-            layer.borderWidth = hovered || outlined ? 2 / lastZoom : 0
+            layer.borderWidth = hovered || outlined ? hoverBorderWidth : 0
             if !hovered { hoveredControl = nil; pressedControl = nil }
             if hovered { paintControls() }   // the app may have come or gone to the front since
             showControls(animated: true)
@@ -280,7 +305,7 @@ final class WindowProxy {
     /// Drawn with the hover border though the pointer isn't on it: bonded to the hovered window, so the
     /// group reads as one. No controls.
     var outlined = false {
-        didSet { if outlined != oldValue { layer.borderWidth = hovered || outlined ? 2 / lastZoom : 0 } }
+        didSet { if outlined != oldValue { layer.borderWidth = hovered || outlined ? hoverBorderWidth : 0 } }
     }
 
     /// The control under the pointer. Any of them shows every button's mark, as on a real window.
@@ -527,8 +552,9 @@ final class WindowProxy {
         let left = max((first.x - lights.diameter / 2) * zoom, minInset)
         let top = max((first.y - lights.diameter / 2) * zoom, minInset)
         let slop = WindowProxy.controlSlop
-        return CGRect(x: worldRect.minX + (left - slop) / zoom,
-                      y: worldRect.minY + (top - slop) / zoom,
+        let rect = apparentRect
+        return CGRect(x: rect.minX + (left - slop) / zoom,
+                      y: rect.minY + (top - slop) / zoom,
                       width: size.width / zoom, height: size.height / zoom)
     }
 
@@ -791,8 +817,8 @@ final class WindowProxy {
             label.isHidden = false
             controls.isHidden = false
         }
-        let r = caRect(worldRect)
-        if hovered || outlined { layer.borderWidth = 2 / zoom }
+        let r = caRect(apparentRect)
+        if hovered || outlined { layer.borderWidth = hoverBorderWidth }
 
         // The label sits just above the window's top-left corner and keeps a constant on-screen size
         // (counter-scaled), fading out as you approach 1:1 where the real title bar takes over. It's no
@@ -800,13 +826,14 @@ final class WindowProxy {
         // widgets side by side are narrower than their labels at most zooms.
         label.position = CGPoint(x: r.minX, y: r.maxY + 6 / zoom)
         label.transform = CATransform3DMakeScale(1 / zoom, 1 / zoom, 1)
-        let labelShown: Float = zoom < 0.85 ? 1 : 0
+        // A tile in Picture in Picture has no label: its chrome names it on hover, as a video's does.
+        let labelShown: Float = zoom < 0.85 && pip == nil ? 1 : 0
         let labelOpacity = labelShown * effect.opacity
         if label.opacity != labelOpacity { label.opacity = labelOpacity }
         if labelShown > 0 {
             // The bitmap is cropped to the window's width on screen; 8 pt steps keep the crop from
             // jittering along the last glyph.
-            let width = min(WindowProxy.labelMaxWidth, max(24, (worldRect.width * zoom / 8).rounded(.down) * 8))
+            let width = min(WindowProxy.labelMaxWidth, max(24, (apparentRect.width * zoom / 8).rounded(.down) * 8))
             if label.bounds.size.width != width { label.bounds.size.width = width }
         }
 
@@ -814,7 +841,8 @@ final class WindowProxy {
         controls.position = caRect(controlsWorldRect(zoom: zoom)).origin
         controls.transform = CATransform3DMakeScale(1 / zoom, 1 / zoom, 1)
         let minSize = WindowProxy.controlsMinWindowSize
-        controlsFit = worldRect.width * zoom >= minSize.width && worldRect.height * zoom >= minSize.height
+        // A tile in Picture in Picture has its own chrome (✕, return) instead of the traffic lights.
+        controlsFit = pip == nil && apparentRect.width * zoom >= minSize.width && apparentRect.height * zoom >= minSize.height
         showControls(animated: false)
     }
 
@@ -823,7 +851,7 @@ final class WindowProxy {
         effect = frame
         effectZoom = zoom
         applyEffect()
-        label.opacity = (lastZoom < 0.85 ? 1 : 0) * frame.opacity
+        label.opacity = (lastZoom < 0.85 && pip == nil ? 1 : 0) * frame.opacity
     }
 
     /// The layer's anchor is its bottom-left corner and its space is y-up, so a scale about the frame's
@@ -844,6 +872,10 @@ final class WindowProxy {
             layer.transform = t
         }
         layer.opacity = f.opacity
+        // A tile's corners are a video's on screen (the real window is shaped to match, `PictureInPicture.Reference`):
+        // the hover border follows them, counter-scaled through the zoom and the effect's scale.
+        let onScreen = max(effectZoom, 0.001) * (f.keepsGeometry ? 1 : max(f.scale.width, 0.001))
+        layer.cornerRadius = pip != nil ? PictureInPicture.Reference.cornerRadius / onScreen : cornerRadius
     }
 
     /// The ink and the shadow the canvas wants for every label (`CanvasView.applyInk`).
@@ -857,7 +889,7 @@ final class WindowProxy {
     private func refreshLabel() {
         let name = title.isEmpty ? appName : "\(appName) — \(title)"
         // The pole leads the label while polarity is on: the one cue you can see from far out.
-        let text: String
+        var text: String
         if showsPolarity, let pole = polarity {
             text = "\(pole.glyph) \(name)"
         } else {

@@ -61,6 +61,18 @@ struct Layout: Codable {
         var polarity: String?
         /// The group it's bonded into, numbered from 0 within the layout (`Grouping.saved`); nil when free.
         var group: Int?
+        /// In Picture in Picture (`PictureInPicture`): its tile's top-left on screen, its scale and, tucked
+        /// away, the side; nil when not.
+        var pip: Pip?
+    }
+
+    /// A tile as saved: view coordinates of the display the layout was saved on; `tucked` is a
+    /// `PictureInPicture.Side` raw value, or nil.
+    struct Pip: Codable, Equatable {
+        var x: Double
+        var y: Double
+        var scale: Double
+        var tucked: Int?
     }
 
     /// Everything the layout covers on the canvas.
@@ -153,6 +165,7 @@ extension Layout.Entry {
         frame = Layout.Rect(x: p.worldRect.minX, y: p.worldRect.minY, width: p.worldRect.width, height: p.worldRect.height)
         polarity = p.polarity?.rawValue
         self.group = group
+        pip = p.pip.map { Layout.Pip(x: $0.origin.x, y: $0.origin.y, scale: $0.scale, tucked: p.pipTucked?.rawValue) }
     }
 }
 

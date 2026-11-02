@@ -17,17 +17,36 @@ final class KeyTap: @unchecked Sendable {
         case appSwitchCommit
         case appSwitchCancel
         case missionControl
+        /// The Mission Control key let go, `held` seconds after it went down (by the events' own times,
+        /// so a busy main thread can't make a tap read as a hold): held, it picks the window under the
+        /// pointer (`MissionControlHold`).
+        case missionControlUp(held: TimeInterval)
         case showDesktop
         /// ⌘N in a window whose app's ⌘N makes a window, when the canvas places new windows itself.
         case newWindow
+        /// ⌘? from anywhere: Settings › How to use.
+        case howToUse
+        /// ⌃⌘F in a window: Sunlight's full screen (filling its area, then entered there), not a Space of its own.
+        case fillAndEnter
     }
 
     struct State: Sendable {
+        /// Between `start` and `stop`: the tap acts. Off, every key passes untouched. The tap's thread
+        /// and port live on across stops (made once, for the process): stopping used to post the
+        /// teardown to the thread's run loop, which a `stop` right after `start` (Sunlight switched off
+        /// at login, takeover on) found not up yet and skipped, so the tap went on taking ⌘Tab and the
+        /// Mission Control key with Sunlight off; and a stop and a start in quick succession could
+        /// invalidate the new thread's port, after which nothing reinstalled it.
+        var enabled = false
         var entered = false
         var switcherOpen = false
         /// ⌘N is the canvas's to handle (`Command.newWindow`): the entered app's ⌘N makes a window and
         /// windows push each other.
         var placesNewWindow = false
+        /// A full-screen app's Space is in front: ⌃← goes back to the canvas's Desktop, as on the Mac.
+        var inFullScreenSpace = false
+        /// When the Mission Control key went down (the event's timestamp, ns), until it's let go.
+        var missionControlDownAt: UInt64?
         /// Key codes whose keyDown we swallowed; their keyUp is swallowed too so apps never see an orphan.
         var swallowed = Set<Int64>()
     }
@@ -40,6 +59,8 @@ final class KeyTap: @unchecked Sendable {
 
     private static let tab: Int64 = 48
     private static let n: Int64 = 45
+    private static let slash: Int64 = 44
+    private static let f: Int64 = 3
     /// The key left of 1 (` on US layouts): ⌘` walks an app's windows, as on the Mac.
     private static let grave: Int64 = 50
     private static let escape: Int64 = 53
@@ -57,11 +78,45 @@ final class KeyTap: @unchecked Sendable {
     private var runLoop: CFRunLoop?
     private var port: CFMachPort?
 
+    /// The current keyboard layout's key-translation table, for `symbol(of:)`. Read on the main thread
+    /// only: Text Input Sources asserts the main queue (macOS 27 traps on any other, and the tap's
+    /// thread used to ask it on every ⌘ key), so the tap reads this copy, refreshed as layouts change.
+    private let layoutData = OSAllocatedUnfairLock<Data?>(initialState: nil)
+    private var layoutObserver: NSObjectProtocol?
+
+    @MainActor
     init(handler: @escaping @MainActor @Sendable (Command) -> Void) {
         self.handler = handler
+        refreshLayout()
+        layoutObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshLayout() }
+        }
+    }
+
+    @MainActor
+    private func refreshLayout() {
+        var data: Data?
+        if let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+           let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) {
+            data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue() as Data
+        }
+        layoutData.withLock { $0 = data }
     }
 
     func start() {
+        state.withLock {
+            $0 = State()
+            $0.enabled = true
+        }
+        if let runLoop {
+            // The tap is there; have it listen again (the thread re-enables it on its own as well).
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) { [self] in
+                if let port { CGEvent.tapEnable(tap: port, enable: true) }
+            }
+            CFRunLoopWakeUp(runLoop)
+            return
+        }
         guard thread == nil else { return }
         let t = Thread { [weak self] in self?.threadMain() }
         t.name = "canvas.keytap"
@@ -70,18 +125,18 @@ final class KeyTap: @unchecked Sendable {
         t.start()
     }
 
+    /// Off: every key passes, at once, whether or not the tap's thread is up yet. The tap itself is
+    /// told to stop listening too, so the keys don't even round-trip through this process meanwhile.
     func stop() {
+        state.withLock { $0 = State() }
         guard let runLoop else { return }
-        self.runLoop = nil
-        thread = nil
         CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) { [self] in
-            if let port { CFMachPortInvalidate(port) }
-            self.port = nil
-            CFRunLoopStop(CFRunLoopGetCurrent())
+            if let port { CGEvent.tapEnable(tap: port, enable: false) }
         }
         CFRunLoopWakeUp(runLoop)
-        state.withLock { $0 = State() }
     }
+
+    private var isEnabled: Bool { state.withLock { $0.enabled } }
 
     /// Whether a real window is in front (changes what ⌘Tab means).
     func update(entered: Bool) {
@@ -94,6 +149,11 @@ final class KeyTap: @unchecked Sendable {
     /// Whether ⌘N in the entered window is the canvas's (`Command.newWindow`).
     func update(placesNewWindow: Bool) {
         state.withLock { $0.placesNewWindow = placesNewWindow && $0.entered }
+    }
+
+    /// Whether a full-screen app's Space is in front (`SpacesWatcher`).
+    func update(inFullScreenSpace: Bool) {
+        state.withLock { $0.inFullScreenSpace = inFullScreenSpace }
     }
 
     // MARK: Tap thread
@@ -124,8 +184,8 @@ final class KeyTap: @unchecked Sendable {
         self.port = port
         let source = CFMachPortCreateRunLoopSource(nil, port, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-        CGEvent.tapEnable(tap: port, enable: true)
-        NSLog("KeyTap: installed")
+        CGEvent.tapEnable(tap: port, enable: isEnabled)
+        NSLog("KeyTap: installed\(isEnabled ? "" : " (stopped)")")
     }
 
     private func checkTap() {
@@ -134,8 +194,8 @@ final class KeyTap: @unchecked Sendable {
             NSLog("KeyTap: port invalidated, reinstalling")
             self.port = nil
             installTap()
-        } else if !CGEvent.tapIsEnabled(tap: port) {
-            CGEvent.tapEnable(tap: port, enable: true)
+        } else if CGEvent.tapIsEnabled(tap: port) != isEnabled {
+            CGEvent.tapEnable(tap: port, enable: isEnabled)
         }
     }
 
@@ -147,9 +207,11 @@ final class KeyTap: @unchecked Sendable {
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let port { CGEvent.tapEnable(tap: port, enable: true) }
+            if let port, isEnabled { CGEvent.tapEnable(tap: port, enable: true) }
             return Unmanaged.passUnretained(event)
         }
+        // Stopped: nothing is the canvas's (a key that came through before the tap stopped listening).
+        guard isEnabled else { return Unmanaged.passUnretained(event) }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate])
@@ -157,14 +219,20 @@ final class KeyTap: @unchecked Sendable {
         let action: Action
         switch type {
         case .keyDown:
-            let character = flags.contains(.maskCommand) ? KeyTap.character(of: event) : nil
+            let command = flags.contains(.maskCommand)
+            let character = command ? KeyTap.character(of: event) : nil
+            let symbol = command ? symbol(of: event) : nil
+            let autorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            let timestamp = event.timestamp
             action = state.withLock { s -> Action in
-                let a = KeyTap.action(keyCode: keyCode, flags: flags, state: &s, character: character)
+                let a = KeyTap.action(keyCode: keyCode, flags: flags, state: &s, character: character, symbol: symbol,
+                                      autorepeat: autorepeat, timestamp: timestamp)
                 if case .pass = a {} else { s.swallowed.insert(keyCode) }
                 return a
             }
         case .keyUp:
-            action = state.withLock { $0.swallowed.remove(keyCode) != nil ? .swallow : .pass }
+            let timestamp = event.timestamp
+            action = state.withLock { KeyTap.release(keyCode: keyCode, state: &$0, timestamp: timestamp) }
         case .flagsChanged:
             // Letting go of ⌘ while the switcher is open picks the highlighted window.
             let commit = state.withLock { s -> Bool in
@@ -198,8 +266,32 @@ final class KeyTap: @unchecked Sendable {
         return length > 0 ? String(utf16CodeUnits: chars, count: length).lowercased() : nil
     }
 
+    /// What the key types with only ⇧ held, ⌘ taken off: on a Cyrillic layout, ⌘ turns a key into its
+    /// Latin twin, so ⌘? read with ⌘ is not a ? at all. Translated afresh from the current layout
+    /// (`layoutData`, kept by the main thread), since the event's own string was fixed with ⌘ in. For
+    /// the keys matched by their symbol (⌘?).
+    private func symbol(of event: CGEvent) -> String? {
+        guard let layout = layoutData.withLock({ $0 }) else { return nil }
+        let keyCode = UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode))
+        let modifiers: UInt32 = event.flags.contains(.maskShift) ? UInt32((shiftKey >> 8) & 0xFF) : 0
+        var deadKeys: UInt32 = 0
+        var length = 0
+        var chars = [UniChar](repeating: 0, count: 4)
+        let status = layout.withUnsafeBytes { bytes -> OSStatus in
+            guard let base = bytes.baseAddress else { return -1 }
+            return UCKeyTranslate(base.assumingMemoryBound(to: UCKeyboardLayout.self), keyCode,
+                                  UInt16(kUCKeyActionDown), modifiers, UInt32(LMGetKbdType()),
+                                  UInt32(kUCKeyTranslateNoDeadKeysMask), &deadKeys, chars.count, &length, &chars)
+        }
+        guard status == noErr, length > 0 else { return nil }
+        return String(utf16CodeUnits: chars, count: length)
+    }
+
     /// `character`: what the key types (`character(of:)`), where known; the N key's code stands in for it.
-    static func action(keyCode: Int64, flags: CGEventFlags, state: inout State, character: String? = nil) -> Action {
+    /// `symbol`: what it types with ⌘ taken off (`symbol(of:)`), for ⌘? on any layout.
+    /// `autorepeat`: the key is held and this is the system repeating it. `timestamp`: the event's, in ns.
+    static func action(keyCode: Int64, flags: CGEventFlags, state: inout State, character: String? = nil, symbol: String? = nil,
+                       autorepeat: Bool = false, timestamp: UInt64 = 0) -> Action {
         let command = flags.contains(.maskCommand)
         let control = flags.contains(.maskControl)
         let option = flags.contains(.maskAlternate)
@@ -208,6 +300,18 @@ final class KeyTap: @unchecked Sendable {
         if character.map({ $0 == "n" }) ?? (keyCode == n), state.entered, state.placesNewWindow,
            command, !control, !option, !shift {
             return .send(.newWindow)
+        }
+
+        // ⌃⌘F, macOS's full screen, in a window: Sunlight's instead, so the window stays on the canvas.
+        // With ⌃ held the key types its control character (⌃F is U+0006 on any layout).
+        if character.map({ $0 == "f" || $0 == "\u{06}" }) ?? (keyCode == f), state.entered, !state.inFullScreenSpace,
+           command, control, !option, !shift {
+            return .send(.fillAndEnter)
+        }
+
+        // ⌘? on any layout (the key that types ?, or ⌘⇧/): How to use, from the canvas or inside a window.
+        if command, !control, !option, symbol == "?" || character == "?" || (keyCode == slash && shift) {
+            return .send(.howToUse)
         }
 
         switch keyCode {
@@ -230,16 +334,33 @@ final class KeyTap: @unchecked Sendable {
             return .send(.appSwitchStep(reverse: false))
         case leftArrow where state.switcherOpen && command && !control && !option:
             return .send(.appSwitchStep(reverse: true))
-        case leftArrow, rightArrow:
-            // Spaces switching: there is only one Space in this environment.
+        case leftArrow where state.inFullScreenSpace:
+            // From a full-screen app's Space, ⌃← is the way back to the canvas's Desktop.
+            return .pass
+        case leftArrow, rightArrow, upArrow, downArrow:
+            // Spaces switching and Mission Control's ⌃↑ ⌃↓: one Desktop per display, the canvas's.
             return (control && !command && !option) ? .swallow : .pass
         case missionControlKey where !command && !control && !option:
+            // Held, the key repeats: it's still the one press (held to pick a window), not a toggle each time.
+            if autorepeat || state.missionControlDownAt != nil { return .swallow }
+            state.missionControlDownAt = timestamp
             return .send(.missionControl)
         case f11 where !command && !control && !option:
             return .send(.showDesktop)
         default:
             return .pass
         }
+    }
+
+    /// A key let go: its keyUp is swallowed if its keyDown was. The Mission Control key's says how long it was held.
+    static func release(keyCode: Int64, state: inout State, timestamp: UInt64) -> Action {
+        let wasSwallowed = state.swallowed.remove(keyCode) != nil
+        if keyCode == missionControlKey, let down = state.missionControlDownAt {
+            state.missionControlDownAt = nil
+            let held = timestamp >= down ? TimeInterval(timestamp - down) / 1_000_000_000 : 0
+            return .send(.missionControlUp(held: held))
+        }
+        return wasSwallowed ? .swallow : .pass
     }
 
     private func send(_ command: Command) {

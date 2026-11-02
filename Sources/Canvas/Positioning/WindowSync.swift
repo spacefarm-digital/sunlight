@@ -42,8 +42,13 @@ enum WindowSync {
     /// The word on one window.
     /// - `owner`: whose position it is.
     /// - `isWidget`: a desktop widget's own spot is where it is on the desktop at 1:1, whoever is in front.
-    /// - `capturing`: the capture renderer, where the native windows sit untouched behind the canvas and
-    ///   the listing has always been the truth for them.
+    /// - `capturing`: the capture renderer, where the native windows sit behind the canvas. Its listing
+    ///   is no more the truth for a canvas-owned window's place than the live one's: the handoff puts
+    ///   the real window where the canvas has the proxy through Accessibility, and reads it back the
+    ///   same way on the way out, and the window server's frame can differ from the app's own by a
+    ///   constant (33 pt under a menu bar, more after a live-windows session); taken as a move through
+    ///   the zoomed-out camera, that constant became a jump of the proxy on every trip into the window.
+    ///   The size is still taken (the app's own resize).
     /// - `transformed`: live windows are presented, drawn through the canvas's own transforms: the
     ///   window server may report the transformed rectangle, and feeding that back would move the
     ///   proxy by a rounding step every tick.
@@ -55,7 +60,7 @@ enum WindowSync {
         guard !transformed else { return .keep }
         guard !listed.isClose(to: last) else { return .keep }
         guard !sizeHeld else { return .keep }
-        if isWidget || capturing || owner == .user { return .move }
+        if isWidget || owner == .user { return .move }
         return .size
     }
 }

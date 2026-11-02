@@ -305,7 +305,8 @@ final class MinimapView: NSView {
             wanted.append(id)
             let mark = marks[id] ?? makeMark(for: p)
             marks[id] = mark
-            place(mark, for: p, away: away, in: m.toMap(p.worldRect).insetBy(dx: 0.5, dy: 0.5))
+            // A tile's home is drawn as an away window's: the window is in a corner of the screen, not there.
+            place(mark, for: p, away: away || p.pip != nil, in: m.toMap(p.worldRect).insetBy(dx: 0.5, dy: 0.5))
         }
         for (id, mark) in marks where !seen.contains(id) {
             mark.shape.removeFromSuperlayer()

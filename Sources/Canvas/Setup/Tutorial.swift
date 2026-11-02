@@ -1,11 +1,11 @@
 import SwiftUI
 
 /// The basics, as a short tutorial: a handful of moves, one to a step, each acted out by the same loop Settings ›
-/// Trackpad and the Instructions play (`GestureGuide`): a miniature canvas beside the hand doing it. It
+/// How to use › Trackpad plays (`GestureGuide`): a miniature canvas beside the hand doing it. It
 /// asks first whether you use a trackpad or a mouse, and shows the moves for that one: fingertips on a
 /// trackpad, or a mouse and the keys. It's a page of Set Up Sunlight (`SetupFlow.Page.basics`), shown
-/// once, right after the two permissions and before "You're set"; the Instructions' The Basics chapter
-/// plays it again.
+/// once, right after the two permissions and before "You're set"; Settings › How to use ›
+/// Basics plays it again.
 ///
 /// A trackpad step names its gesture and takes the hand's words from it (`GestureGuide.Gesture.how`),
 /// so when a gesture changes there, the tutorial follows. Where two gestures do the same thing (a click
@@ -50,7 +50,7 @@ enum Tutorial {
         /// What the hand does: the words under the picture.
         var how: String { mouse?.how ?? gesture.how }
 
-        /// The step with See All shown the way Settings › Trackpad has it (the tap by default).
+        /// The step with See All shown the way Settings › How to use has it (the tap by default).
         func resolved(seeAll: Settings.SeeAllGesture) -> Step {
             var step = self
             if gesture == .fourFingerTap || gesture == .swipeUp {
@@ -109,7 +109,7 @@ enum Tutorial {
     ]
 
     /// Under the last step: where the rest is.
-    static let rest = "The rest is in Instructions, in the sun icon’s More menu, or ⌘?."
+    static let rest = "The rest is in Settings › How to use, or ⌘?."
 
     /// The step at `index`, kept in range.
     static func step(_ index: Int, for input: Input) -> Step {

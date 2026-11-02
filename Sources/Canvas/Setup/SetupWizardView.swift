@@ -495,7 +495,7 @@ struct TourTable: View {
         ("Enter a window", "click  ·  ⏎"),
         ("Zoom and pan", "pinch  ·  ⌥ or ⌘ scroll  ·  four-finger drag"),
         ("Place windows", "⌃⌥ keys: one window, one screen, everything"),
-        ("Learn the rest", "Instructions, in the sun icon’s More  ·  ⌘?"),
+        ("Learn the rest", "Settings › How to use  ·  ⌘?"),
         ("Save and restore layouts", "⌘S  ·  ⌘1 – ⌘9"),
         ("Everything else", "the sun icon in the menu bar"),
     ]

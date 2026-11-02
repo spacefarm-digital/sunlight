@@ -10,7 +10,8 @@
 // objects and functions (the part that breaks with each macOS release), the patching of the Dock's
 // animation-time instruction, and the Spaces, opacity, sticky, shadow, focus, thumbnail-scale and
 // proxy operations. Only the stock move (0x06) and order (0x10) operations remain beside Sunlight's,
-// and 0x01 now answers with the add-on's version.
+// and 0x01 now answers with the add-on's version. Desktops came back in sunlight-55 (spaces.h), through
+// SkyLight's own Space calls rather than the Dock's internals.
 #include <Foundation/Foundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <sys/socket.h>
@@ -34,6 +35,7 @@ extern CGError SLSOrderWindow(int cid, uint32_t wid, int order, uint32_t rel_wid
 extern CGError SLSSetWindowLevel(int cid, uint32_t wid, int level);
 
 #include "sunbeam.h"
+#include "spaces.h"
 
 static int daemon_sockfd = -1;
 
@@ -91,6 +93,7 @@ static void handle_message(int sockfd, const char *message, int length)
     case SA_OPCODE_WINDOW_MOVE:  do_window_move(message + 1, length - 1); break;
     case SA_OPCODE_WINDOW_ORDER: do_window_order(message + 1, length - 1); break;
     case SA_OPCODE_WINDOW_LEVEL: do_window_level(message + 1, length - 1); break;
+    case SUNBEAM_SPACES:         sunbeam_spaces(sockfd, message + 1, length - 1); break;
     default: break;   // unknown opcodes are ignored, not answered
     }
 }

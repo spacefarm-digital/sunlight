@@ -39,3 +39,40 @@ final class StreamLimitTests: XCTestCase {
         XCTAssertTrue(CanvasController.streamed(all, moving: false, limit: 0).isEmpty)
     }
 }
+
+/// The live frame takes at most `LiveWindowsWire.maxWindows` windows: past that, the ones nearest the view.
+@MainActor
+final class FrameCapTests: XCTestCase {
+    private let view = CGRect(x: 0, y: 0, width: 1000, height: 600)
+
+    func testEveryWindowGoesWhenTheyFit() {
+        let rects = (0..<5).map { CGRect(x: CGFloat($0) * 2000, y: 0, width: 100, height: 100) }
+        XCTAssertEqual(CanvasController.nearestIndices(rects, to: view, limit: 5), [0, 1, 2, 3, 4])
+        XCTAssertEqual(CanvasController.nearestIndices(rects, to: view, limit: 128), [0, 1, 2, 3, 4])
+    }
+
+    func testTheNearestGoFirstInTheirOrder() {
+        // In view, just past the edge, far away, in view again, farther still.
+        let rects = [CGRect(x: 100, y: 100, width: 100, height: 100),
+                     CGRect(x: 1100, y: 0, width: 100, height: 100),
+                     CGRect(x: 5000, y: 0, width: 100, height: 100),
+                     CGRect(x: 500, y: 300, width: 100, height: 100),
+                     CGRect(x: 0, y: -4000, width: 100, height: 100)]
+        XCTAssertEqual(CanvasController.nearestIndices(rects, to: view, limit: 3), [0, 1, 3])
+        XCTAssertEqual(CanvasController.nearestIndices(rects, to: view, limit: 2), [0, 3])
+    }
+
+    func testThePinnedWindowAlwaysGoes() {
+        // In view, just past the edge, far away: the far one goes when it's pinned, in the nearest one's place.
+        let rects = [CGRect(x: 100, y: 100, width: 100, height: 100),
+                     CGRect(x: 1100, y: 0, width: 100, height: 100),
+                     CGRect(x: 9000, y: 9000, width: 100, height: 100)]
+        XCTAssertEqual(CanvasController.nearestIndices(rects, to: view, limit: 2, pinned: 2), [0, 2])
+        XCTAssertEqual(CanvasController.nearestIndices(rects, to: view, limit: 1, pinned: 2), [2])
+    }
+
+    func testAtTheSameDistanceTheTopmostGoes() {
+        let rects = (0..<4).map { _ in CGRect(x: 3000, y: 0, width: 100, height: 100) }
+        XCTAssertEqual(CanvasController.nearestIndices(rects, to: view, limit: 2), [2, 3])
+    }
+}

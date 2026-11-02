@@ -218,7 +218,7 @@ private struct MainScreen: View {
             layoutsTile
             Tile {
                 VStack(spacing: 2) {
-                    Row(title: "Instructions…", detail: "⌘?", enabled: !model.setupShowing, bold: true) {
+                    Row(title: "How to Use…", detail: "⌘?", enabled: !model.setupShowing, bold: true) {
                         dismiss(); model.actions.showInstructions()
                     }
                     HeaderRow(title: "More", detail: nil, open: nil, enabled: true) {

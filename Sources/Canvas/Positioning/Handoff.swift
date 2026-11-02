@@ -35,6 +35,10 @@ enum Handoff {
         /// sits exactly where it is, before the menu bar had its say. In capture mode the camera ends
         /// there and the window eases to where it landed, so nothing else on the canvas moves.
         let inPlace: Camera?
+        /// Where the window would sit at `inPlace`, before the menu bar had its say (`origin` when it
+        /// didn't). In capture mode a window the menu bar pushed down keeps its place on the canvas and
+        /// the camera settles at `camera` instead.
+        let inPlaceOrigin: CGPoint
         /// Entered by a click: the way in lasts at least a double-click, so a second click lands on
         /// the canvas, not on the real window.
         let clicked: Bool
@@ -68,10 +72,11 @@ enum Handoff {
         }
         origin = pixelAligned(origin, scale: scale)
         let inPlace = keepsPlace ? Camera(origin: CGPoint(x: rect.minX - origin.x, y: rect.minY - origin.y), zoom: 1) : nil
+        let inPlaceOrigin = origin
         // macOS keeps every window's top below the menu bar; asking for higher lands it right there.
         origin.y = max(visible.minY, origin.y)
         let target = Camera(origin: CGPoint(x: rect.minX - origin.x, y: rect.minY - origin.y), zoom: 1)
-        return Plan(origin: origin, camera: target, inPlace: inPlace, clicked: clicked)
+        return Plan(origin: origin, camera: target, inPlace: inPlace, inPlaceOrigin: inPlaceOrigin, clicked: clicked)
     }
 
     /// Where a window entered in the middle sits on screen: centred in the visible area, or at its
@@ -102,6 +107,14 @@ enum Handoff {
     /// The 1:1 camera at which a world rect sits exactly over a frame in view coordinates.
     static func cameraAligning(_ rect: CGRect, with frame: CGRect) -> Camera {
         Camera(origin: CGPoint(x: rect.minX - frame.minX, y: rect.minY - frame.minY), zoom: 1)
+    }
+
+    /// The 1:1 camera at which the world point under `point` (view coordinates) at `camera` is still
+    /// under it: a window's native place that puts the spot the pointer is on, on the drawn window,
+    /// under the pointer on the real one.
+    static func cameraFixing(_ point: CGPoint, at camera: Camera) -> Camera {
+        let world = camera.toWorld(point)
+        return Camera(origin: CGPoint(x: world.x - point.x, y: world.y - point.y), zoom: 1)
     }
 
     /// Rounded to the pixel grid at `scale`, so a window lands on whole pixels and no edge is drawn soft.

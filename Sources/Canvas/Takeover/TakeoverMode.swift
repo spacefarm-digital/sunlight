@@ -4,7 +4,7 @@ import ServiceManagement
 /// Takeover mode: the canvas as the session's environment rather than an app you switch to.
 ///
 /// Owns the consent step, the record of what was changed on this Mac, the key tap and the foreground
-/// watcher. Everything it changes is put back when Canvas quits, and from the command line with
+/// watcher. Everything it changes but the Desktops it merges (`Spaces`) is put back when Canvas quits, and from the command line with
 /// `Canvas --release` if the app itself can't launch.
 @MainActor
 final class TakeoverMode {
@@ -21,17 +21,20 @@ final class TakeoverMode {
     }
 
     /// Bump when the consent text changes so it is shown again.
-    static let consentVersion = 3
+    static let consentVersion = 4
 
     enum Keys {
         static let enabled = "takeover.enabled"
         static let applied = "takeover.applied"
         static let snapshot = "takeover.snapshot"
         static let declined = "takeover.declinedVersion"
+        /// Desktops have been merged on this Mac (Uninstall says they aren't recreated).
+        static let merged = "takeover.mergedDesktops"
     }
 
     let keyTap: KeyTap
     let watcher = ForegroundWatcher()
+    let spaces = SpacesWatcher()
     private weak var canvas: Desk?
     private(set) var isRunning = false
     /// Restarting Finder can look like a foreign activation; ignore the window right after a restart.
@@ -55,6 +58,8 @@ final class TakeoverMode {
         watcher.onWindowMiniaturized = { [weak canvas] pid, element in canvas?.windowMiniaturized(pid: pid, element: element) }
         watcher.onWindowMoved = { [weak canvas] pid, element in canvas?.windowMoved(pid: pid, element: element) }
         watcher.onEnteredWindowDestroyed = { [weak canvas] pid in canvas?.enteredWindowDestroyed(pid: pid) }
+        spaces.onFullScreenChanged = { [keyTap] inFullScreen in keyTap.update(inFullScreenSpace: inFullScreen) }
+        spaces.onDesktopsToFold = { [weak self] in self?.desktopsToFold() }
     }
 
     // MARK: Launch
@@ -65,6 +70,7 @@ final class TakeoverMode {
         if TakeoverMode.isLight {
             keyTap.start()
             watcher.start()
+            spaces.start()
             isRunning = true
             NSLog("Takeover: light mode — keys and absorb only, nothing changed on the system")
             return
@@ -102,8 +108,10 @@ final class TakeoverMode {
         •  Sunlight starts at login.
         •  ⌘Tab, Mission Control and Show Desktop keys go to the canvas. \
         Mission Control gestures and hot corners are off.
+        •  Each display keeps one Desktop, the canvas. Other Desktops are merged into it; \
+        full-screen apps stay as they are.
 
-        Everything is restored when Sunlight quits. If Sunlight ever can't launch, \
+        Everything else is restored when Sunlight quits; merged Desktops are not recreated. If Sunlight ever can't launch, \
         run Sunlight.app/Contents/MacOS/Sunlight --release in Terminal to put it all back.
         """
         alert.addButton(withTitle: "Take Over")
@@ -117,6 +125,19 @@ final class TakeoverMode {
                 } else {
                     self.defaults.set(TakeoverMode.consentVersion, forKey: Keys.declined)
                 }
+            }
+        }
+    }
+
+    // MARK: Desktops
+
+    /// There are Desktops to fold (`SpacesWatcher`: at the start, and a couple of seconds after one
+    /// appears): merged into the canvas, with nothing asked. The consent says so.
+    private func desktopsToFold() {
+        guard isRunning, !inputSuspended, !TakeoverMode.isLight else { return }
+        DispatchQueue.global(qos: .utility).async {
+            if case .folded = Spaces.fold() {
+                DispatchQueue.main.async { UserDefaults.standard.set(true, forKey: Keys.merged) }
             }
         }
     }
@@ -148,6 +169,7 @@ final class TakeoverMode {
         keyTap.start()
         watcher.start()
         isRunning = true
+        spaces.start()
         DispatchQueue.global(qos: .utility).async { LoginItem.register() }   // launchd round trips
         NSLog("Takeover: on\(changed.isEmpty ? "" : " (changed \(changed.sorted().joined(separator: ", ")); restarted \(restarted.isEmpty ? "nothing" : restarted.joined(separator: ", ")))")")
     }
@@ -162,6 +184,7 @@ final class TakeoverMode {
         inputSuspended = true
         keyTap.stop()
         watcher.stop()
+        spaces.stop()
         NSLog("Takeover: keys and watching suspended")
     }
 
@@ -170,12 +193,14 @@ final class TakeoverMode {
         inputSuspended = false
         keyTap.start()
         watcher.start()
+        spaces.start()
         NSLog("Takeover: keys and watching resumed")
     }
 
     func revert(reason: Reason) {
         keyTap.stop()
         watcher.stop()
+        spaces.stop()
         inputSuspended = false
         isRunning = false
         if TakeoverMode.isLight { return }
@@ -246,11 +271,13 @@ final class TakeoverMode {
             if !otherInstances().isEmpty { print("Sunlight did not quit; restoring anyway.") }
         }
         let changed = revertPrefs()
+        let stageManager = StageManager.restore()
         LoginItem.unregister()
         UserDefaults.standard.set(false, forKey: Keys.enabled)
         UserDefaults.standard.synchronize()
-        print(changed.isEmpty ? "Nothing to restore."
-                              : "Restored: \(changed.sorted().joined(separator: ", "))")
+        var restored = changed.sorted()
+        if stageManager { restored.append("Stage Manager (back on)") }
+        print(restored.isEmpty ? "Nothing to restore." : "Restored: \(restored.joined(separator: ", "))")
         print("Login item removed. Takeover mode is off.")
         return 0
     }
@@ -301,6 +328,7 @@ final class TakeoverMode {
         print("Login item: \(LoginItem.describe(LoginItem.status))")
         print("Accessibility: \(AXIsProcessTrusted() ? "granted" : "not granted")")
         print("Screen Recording: \(CGPreflightScreenCaptureAccess() ? "granted" : "not granted")")
+        print("Stage Manager: \(StageManager.describeCurrent())")
         print("Current values:\n\(SystemPrefs.describeCurrent())")
         if let snapshot = d.dictionary(forKey: Keys.snapshot) {
             print("Snapshot to restore:")

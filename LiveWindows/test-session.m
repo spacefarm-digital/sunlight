@@ -18,7 +18,9 @@ CGError SLSGetWindowOwner(int c, uint32_t w, int *o) { if (w >= 10) return kCGEr
 CGError SLSGetWindowTransform(int c, uint32_t w, CGAffineTransform *t) { *t = transforms[w]; return 0; }
 CGError SLSSetWindowTransform(int c, uint32_t w, CGAffineTransform t) { transforms[w] = t; mutations[w]++; return 0; }
 CGError SLSGetWindowLevel(int c, uint32_t w, int *l) { *l = levels[w]; return 0; }
-CGError SLSSetWindowLevel(int c, uint32_t w, int l) { levels[w] = l; return 0; }
+// Each level set numbered in the order made: a pinned window goes up before the entered one (sunlight-52).
+static int level_calls, level_seq[10];
+CGError SLSSetWindowLevel(int c, uint32_t w, int l) { levels[w] = l; if (w < 10) level_seq[w] = ++level_calls; return 0; }
 static int orders[10];   // how often each window was given a place in the order
 CGError SLSOrderWindow(int c, uint32_t w, int o, uint32_t r) { if (w < 10) orders[w]++; return 0; }
 CGError SLSDisableUpdate(int c) { return 0; }
@@ -39,6 +41,18 @@ static int txn_moves[10];
 static CGPoint moved_to[10];
 CGError SLSTransactionMoveWindowWithGroup(CFTypeRef t, uint32_t w, CGPoint p) { transforms[w] = CGAffineTransformMakeTranslation(-p.x, -p.y); if (w < 10) { txn_moves[w]++; moved_to[w] = p; } return 0; }
 CGError SLSGetWindowBounds(int c, uint32_t w, CGRect *f) { *f = CGRectMake(-transforms[w].tx, -transforms[w].ty, 400, 300); return 0; }
+// Shapes (sunlight-52): a region is faked as its rectangle count, and what each window was last shaped to.
+static int shape_rects[10], shape_sets[10]; static CGPoint shape_at[10];
+CGError CGSNewRegionWithRect(const CGRect *r, CFTypeRef *out) { int one = 1; *out = CFNumberCreate(NULL, kCFNumberIntType, &one); return 0; }
+CGError CGSNewRegionWithRectList(const CGRect *r, int n, CFTypeRef *out) {
+    for (int i = 0; i < n; ++i) assert(r[i].size.width > 0 && r[i].size.height > 0 && r[i].origin.x >= 0 && r[i].origin.y >= 0);
+    *out = CFNumberCreate(NULL, kCFNumberIntType, &n); return 0;
+}
+CGError SLSSetWindowShape(int c, uint32_t w, float x, float y, CFTypeRef region) {
+    if (w >= 10) return kCGErrorFailure;
+    int n = 0; CFNumberGetValue(region, kCFNumberIntType, &n);
+    shape_rects[w] = n; shape_sets[w]++; shape_at[w] = CGPointMake(x, y); return 0;
+}
 // What the window server answers about a window's shadow (the active look's density and offset), and
 // the looks written to it.
 static float shadow_sd[10], shadow_density[10]; static int shadow_oy[10]; static unsigned shadow_writes;
@@ -132,6 +146,34 @@ static uint8_t send_alpha(int fd, uint32_t wid, float alpha) {
     assert(send(fd, bytes, sizeof(bytes), 0) == sizeof(bytes));
     uint8_t status; assert(sunbeam_read(fd, &status, 1));
     return status;
+}
+// The windows pinned to the screen (sunlight-42): a count, then their IDs. `length_count` is the count
+// the length is made for, so a request whose count byte doesn't match can be sent too.
+static uint8_t send_pin(int fd, const uint32_t *wids, int count, int length_count) {
+    char bytes[2 + 2 + 4 * 8]; int16_t length = 2 + 4 * length_count;
+    memcpy(bytes, &length, 2); bytes[2] = SUNBEAM_PIN; bytes[3] = (char)count;
+    for (int i = 0; i < length_count; ++i) memcpy(bytes + 4 + i * 4, &wids[i], 4);
+    assert(send(fd, bytes, 2 + length, 0) == 2 + length);
+    uint8_t status; assert(sunbeam_read(fd, &status, 1));
+    return status;
+}
+// A shape request (sunlight-52): a window and a corner radius in its own points.
+static uint8_t send_shape(int fd, uint32_t wid, float radius) {
+    char bytes[11]; int16_t length = 9;
+    memcpy(bytes, &length, 2); bytes[2] = SUNBEAM_SHAPE;
+    memcpy(bytes + 3, &wid, 4); memcpy(bytes + 7, &radius, 4);
+    assert(send(fd, bytes, sizeof(bytes), 0) == sizeof(bytes));
+    uint8_t status; assert(sunbeam_read(fd, &status, 1));
+    return status;
+}
+// An empty full frame naming the app in front (sunlight-11): every window released, the canvas staying up.
+static void send_above(int fd, int pid) {
+    char above[2 + 16]; int16_t above_size = 16; uint32_t bd = 1, ov = 2; uint16_t none = 0;
+    memcpy(above, &above_size, 2); above[2] = SUNBEAM_FRAME;
+    memcpy(above + 3, &bd, 4); memcpy(above + 7, &ov, 4); memcpy(above + 11, &none, 2); above[13] = SUNBEAM_FRAME_FULL;
+    memcpy(above + 14, &pid, 4);
+    assert(send(fd, above, sizeof(above), 0) == sizeof(above));
+    uint8_t ack; assert(sunbeam_read(fd, &ack, 1) && ack == 0);
 }
 static double shadow_value(uint32_t w, const char *key) {
     CFStringRef string = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
@@ -440,9 +482,87 @@ int main(void) {
     alphas[4] = 1;
     transforms[4] = original; levels[4] = -10;
 
+    // Pinned windows (sunlight-42): 5 pinned, 4 entered through a handoff. 5 stays as it is, at its
+    // transform, at the pinned level above the entered window: neither moved, nor settled, nor put back;
+    // 6 is put back as before. A request whose count doesn't match its length is refused, the lease goes on.
+    transforms[4] = original; transforms[5] = CGAffineTransformMakeTranslation(-50, -60);
+    transforms[6] = CGAffineTransformMakeTranslation(-70, -80); levels[4] = -10; levels[5] = 0; levels[6] = 0;
+    fd = start(&thread);
+    send_flagged(fd, three, 3, SUNBEAM_FRAME_FULL, 2);
+    {
+        uint32_t pin5[1] = {5};
+        assert(send_pin(fd, pin5, 2, 1) == 1);
+        assert(send_pin(fd, pin5, 1, 1) == 0);
+        int moves5 = mutations[5], txmoves5 = txn_moves[5], orders5 = orders[5];
+        char h[2 + 21]; int16_t h_size = 21; uint32_t hw = 4, hov = 2, hbd = 1; float hx = 120, hy = 80;
+        memcpy(h, &h_size, 2); h[2] = SUNBEAM_HANDOFF;
+        memcpy(h + 3, &hw, 4); memcpy(h + 7, &hx, 4); memcpy(h + 11, &hy, 4); memcpy(h + 15, &hov, 4); memcpy(h + 19, &hbd, 4);
+        assert(send(fd, h, sizeof(h), 0) == sizeof(h));
+        assert(sunbeam_read(fd, &status, 1) && status == 0);
+        assert(levels[5] == SUNBEAM_PINNED && transforms[5].a == 2 && transforms[5].tx == -400 && transforms[5].ty == -200);
+        assert(mutations[5] == moves5 && txn_moves[5] == txmoves5 && orders[5] == orders5);
+        assert(level_seq[5] < level_seq[4]);   // the tile went up before the entered window came up under it
+        assert(levels[4] == SUNBEAM_FRONT && transforms[4].a == 1 && transforms[4].tx == -120);
+        assert(levels[6] == 0 && transforms[6].a == 1 && transforms[6].tx == -70);
+        assert(levels[1] == SUNBEAM_LEVEL && levels[2] == SUNBEAM_LEVEL);
+    }
+    close(fd); pthread_join(thread, NULL);
+    assert(levels[5] == SUNBEAM_PINNED && transforms[5].a == 2);   // on show, like the entered window, once the lease is gone
+    // The canvas back: a frame takes the pinned window as any window (its native place read off its
+    // bounds), and a frame without it puts it back to its own level, not the pinned one.
+    fd = start(&thread);
+    {
+        uint32_t just5[1] = {5};
+        send_flagged(fd, just5, 1, SUNBEAM_FRAME_FULL, 3);
+        assert(levels[5] == SUNBEAM_LEVEL && transforms[5].a == 3);
+        send_flagged(fd, just4, 1, SUNBEAM_FRAME_FULL, 2);
+        assert(levels[5] == 0 && transforms[5].a == 1 && transforms[5].tx == -400 && transforms[5].ty == -200);
+    }
+    close(fd); pthread_join(thread, NULL);
+    // A release for an app that took the front: the pinned window stays on show at the pinned level, as
+    // it is, and the lease forgets it; the rest go back and the canvas stays up.
+    transforms[4] = original; transforms[5] = CGAffineTransformMakeTranslation(-50, -60); levels[4] = -10; levels[5] = 0;
+    fd = start(&thread);
+    send_flagged(fd, both, 2, SUNBEAM_FRAME_FULL, 2);
+    {
+        uint32_t pin5[1] = {5};
+        assert(send_pin(fd, pin5, 1, 1) == 0);
+        int moves5 = mutations[5];
+        // Its corners rounded (sunlight-52): 2 * 12 + 1 rectangles, at the window's native place; a
+        // radius of 0 is one rectangle; a nonsense radius or an unknown window is refused.
+        assert(send_shape(fd, 5, 12) == 0 && shape_rects[5] == 25 && shape_at[5].x == 400 && shape_at[5].y == 200);
+        assert(send_shape(fd, 5, -1) == 1 && send_shape(fd, 5, NAN) == 1 && send_shape(fd, 12, 12) == 12);
+        assert(send_shape(fd, 6, 0) == 0 && shape_sets[6] == 0);   // never rounded: nothing to put back
+        send_above(fd, getpid());
+        assert(levels[5] == SUNBEAM_PINNED && transforms[5].a == 2 && mutations[5] == moves5);
+        assert(shape_rects[5] == 25);   // on show as a tile, its corners stay
+        assert(CGAffineTransformEqualToTransform(transforms[4], original) && levels[4] == -10);
+        assert(levels[1] == SUNBEAM_LEVEL && levels[2] == SUNBEAM_LEVEL);
+    }
+    close(fd); pthread_join(thread, NULL);
+    assert(levels[5] == SUNBEAM_PINNED && transforms[5].a == 2 && shape_rects[5] == 25);
+    // A radius of 0 puts the full shape back, on a lease that holds nothing.
+    fd = start(&thread);
+    assert(send_shape(fd, 5, 0) == 0 && shape_rects[5] == 1);
+    close(fd); pthread_join(thread, NULL);
+    // With no app in front (the lease's end, the canvas going dormant) a pinned window goes back with the rest,
+    // its full shape with it.
+    transforms[5] = CGAffineTransformMakeTranslation(-50, -60); levels[5] = 0;
+    fd = start(&thread);
+    send_flagged(fd, both, 2, SUNBEAM_FRAME_FULL, 2);
+    {
+        uint32_t pin5[1] = {5};
+        assert(send_pin(fd, pin5, 1, 1) == 0);
+        assert(send_shape(fd, 5, 8) == 0 && shape_rects[5] == 17);
+    }
+    close(fd); pthread_join(thread, NULL);
+    assert(levels[5] == 0 && transforms[5].a == 1 && transforms[5].tx == -50 && transforms[5].ty == -60);
+    assert(shape_rects[5] == 1 && shape_at[5].x == 50 && shape_at[5].y == 60);
+    assert(CGAffineTransformEqualToTransform(transforms[4], original) && levels[4] == -10);
+
     fd = start(&thread); send_frame(fd, 4, false);
     // No heartbeat: Dock restores on the three-second lease timeout even if the client hangs.
     pthread_join(thread, NULL); close(fd);
     assert(CGAffineTransformEqualToTransform(transforms[4], original) && levels[4] == -10);
-    puts("PASS: fragmented frames, windows put back at native size only after the commit, disconnect, invalid transform, two leases at once, window alpha (leased only, relative, back on release, handoff and a full frame leaving it out), handoff (leased, unleased, missing, keeping windows on show, native places stopped at the menu bar), shadows (eased both ways, refused, cut short), flagged frames (partial, keepalive, full, app in front), the canvas lifted and lowered, a window minimized while leased never ordered, lease expiry, unmanaged isolation");
+    puts("PASS: fragmented frames, windows put back at native size only after the commit, disconnect, invalid transform, two leases at once, window alpha (leased only, relative, back on release, handoff and a full frame leaving it out), handoff (leased, unleased, missing, keeping windows on show, native places stopped at the menu bar), shadows (eased both ways, refused, cut short), flagged frames (partial, keepalive, full, app in front), the canvas lifted and lowered, a window minimized while leased never ordered, lease expiry, pinned windows (on show through a handoff and a release for an app in front, raised before the windows that come up under them, taken back by a frame, put back at the lease's end), shapes (rounded corners as rows at the native place, refused, put back on request and at the lease's end), unmanaged isolation");
 }

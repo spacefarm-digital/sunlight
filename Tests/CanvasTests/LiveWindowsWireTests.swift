@@ -80,6 +80,16 @@ final class LiveWindowsWireTests: XCTestCase {
         XCTAssertEqual(w.transform.d, 4, accuracy: 1e-9)
     }
 
+    func testAnchorPacking() {
+        let data = LiveWindowsWire.anchor(7, x: 1.5, y: -2)
+        // Length (int16), opcode, id, then the origin as two floats.
+        XCTAssertEqual(data.count, 2 + 1 + 4 + 8)
+        XCTAssertEqual(data[2], LiveWindowsWire.anchor)
+        XCTAssertEqual(data.subdata(in: 3..<7).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }, 7)
+        XCTAssertEqual(data.subdata(in: 7..<11).withUnsafeBytes { $0.loadUnaligned(as: Float.self) }, 1.5)
+        XCTAssertEqual(data.subdata(in: 11..<15).withUnsafeBytes { $0.loadUnaligned(as: Float.self) }, -2)
+    }
+
     func testAlphaPacking() {
         let data = LiveWindowsWire.alpha([(5, 0.5), (9, 2)])
         // Length (int16), opcode, count, then id + float per window, values clamped to 0...1.

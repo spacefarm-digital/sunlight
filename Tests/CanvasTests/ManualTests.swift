@@ -13,7 +13,7 @@ final class ManualTests: XCTestCase {
     func testTheBasicsTeachTheGesturesAsTheyAreNow() {
         let rows = Manual.gettingAround
         XCTAssertEqual(rows.first?.title, "See everything")
-        XCTAssertEqual(rows.first?.how, "four-finger tap (or swipe up: Settings › Trackpad)")
+        XCTAssertEqual(rows.first?.how, "four-finger tap (or swipe up: Settings › How to use)")
         XCTAssertFalse(rows.contains { $0.how.contains("esc") }, "esc does nothing on the canvas")
         XCTAssertEqual(Set(rows.map(\.title)).count, rows.count)
         XCTAssertTrue(rows.suffix(2).contains { $0.how.contains("four-finger drag") }, "four-finger pan near the end")

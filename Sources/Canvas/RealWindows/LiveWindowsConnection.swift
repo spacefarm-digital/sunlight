@@ -13,11 +13,16 @@ enum LiveWindowsWire {
     static let handoff: UInt8 = 0x73
     static let shadow: UInt8 = 0x74
     static let alpha: UInt8 = 0x75
+    static let pin: UInt8 = 0x76
+    static let shape: UInt8 = 0x77
+    static let spaces: UInt8 = 0x78
+    static let anchor: UInt8 = 0x79
     static let magic = Data("SUNBEAM1\n".utf8)
     static let maxWindows = 128
     /// The add-on this build carries (LiveWindows/osax/common.h). An older one in the Dock still works,
     /// with what it has; the app asks to reload it once it answers.
-    static let additionVersion = "sunlight-41"
+
+    static let additionVersion = "sunlight-57"
     /// The first add-on that holds a lease per canvas, so that every display's canvas can show live
     /// windows; with an older one only the main display's does, and the others show pictures.
     static let leasePerCanvas = 13
@@ -55,6 +60,69 @@ enum LiveWindowsWire {
     /// whenever it gives the window back; sunlight-40 and up. Earlier ones open and close windows with
     /// their geometry and the canvas's veil alone.
     static func alphaInDock(_ version: String?) -> Bool { additionNumber(version) >= 40 }
+    /// Whether an add-on of this version keeps the windows pinned to the screen (`pin(_:)`) on show as they
+    /// are, above the entered window, through a handoff and a release for an app in front; sunlight-42 and
+    /// up. With an older one a pinned window shows only while the canvas is up.
+    static func pinsInDock(_ version: String?) -> Bool { additionNumber(version) >= 42 }
+    /// Whether an add-on of this version shapes a window (`shape(_:radius:)`): a tile in Picture in Picture
+    /// gets rounded corners, and its full shape back when it leaves; sunlight-52 and up.
+    static let shapesFrom = 52
+    static func shapesInDock(_ version: String?) -> Bool { additionNumber(version) >= shapesFrom }
+
+    /// A window's corner radius in its own points (sunlight-52): its shape becomes its bounds with corners
+    /// of that radius, 0 its full bounds again. The window needn't be leased.
+    static func shape(_ id: CGWindowID, radius: Float) -> Data {
+        var data = Data()
+        pack(id, into: &data)
+        pack(max(0, radius.isFinite ? radius : 0), into: &data)
+        return message(shape, data)
+    }
+
+    /// Whether an add-on of this version moves a leased window's real frame with its picture unmoved
+    /// (`anchor(_:x:y:)`); sunlight-56 and up.
+    static let anchorsFrom = 56
+    static func anchorsInDock(_ version: String?) -> Bool { additionNumber(version) >= anchorsFrom }
+
+    /// A leased window's real frame to this origin (global, top-left), its transform set again in the
+    /// same window-server transaction so nothing on screen changes (sunlight-56): for an app that reads
+    /// the raw pointer against its real frame. Not clamped under the menu bar. The add-on answers its
+    /// status and where the window landed, two floats (`RealWindowDriver.anchor`).
+    static func anchor(_ id: CGWindowID, x: Float, y: Float) -> Data {
+        var data = Data()
+        pack(id, into: &data); pack(x, into: &data); pack(y, into: &data)
+        return message(anchor, data)
+    }
+
+    /// The windows pinned to the screen (sunlight-42): a count, then their IDs. The add-on keeps the list
+    /// for the lease and leaves those windows as they are at a handoff or a release for an app in front.
+    static func pin(_ windows: [CGWindowID]) -> Data {
+        var data = Data()
+        let some = windows.prefix(maxWindows)
+        data.append(UInt8(some.count))
+        for id in some { pack(id, into: &data) }
+        return message(pin, data)
+    }
+
+    /// Whether an add-on of this version moves windows between Desktops and removes Desktops
+    /// (`moveToDesktop`, `removeDesktop`); sunlight-55 and up.
+    static func spacesInDock(_ version: String?) -> Bool { additionNumber(version) >= 55 }
+
+    /// Windows onto a Desktop (sunlight-55), on a connection of its own: the Desktop, a count, the windows.
+    static func moveToDesktop(_ windows: [CGWindowID], desktop: UInt64) -> Data {
+        var data = Data([1])
+        pack(desktop, into: &data)
+        let some = windows.prefix(maxWindows)
+        data.append(UInt8(some.count))
+        for id in some { pack(id, into: &data) }
+        return message(spaces, data)
+    }
+
+    /// An empty Desktop removed (sunlight-55).
+    static func removeDesktop(_ desktop: UInt64) -> Data {
+        var data = Data([2])
+        pack(desktop, into: &data)
+        return message(spaces, data)
+    }
 
     /// The alpha of leased windows, each 0...1 (sunlight-40): a count, then the window and its alpha
     /// for each. Windows the lease doesn't hold are passed over.
@@ -103,6 +171,8 @@ enum LiveWindowsWire {
     /// that of the windows on show above it while the canvas is away.
     static let canvasLevel: Int32 = 1
     static let frontLevel: Int32 = 2
+    /// The level of a window pinned to the screen while the canvas is away (sunlight-42): above the front ones.
+    static let pinnedLevel: Int32 = 3
     static func level(_ id: CGWindowID, _ level: Int32) -> Data {
         var data = Data(); pack(id, into: &data); pack(level, into: &data)
         return message(0x12, data)
@@ -396,6 +466,18 @@ final class LiveWindowsConnection {
         } catch { return false }
     }
 
+    /// A request on its own connection that the add-on answers with a status byte (the Desktops op), or
+    /// nil when nothing answered. Removing the Desktop you're on waits for the switch away from it, so
+    /// this waits a second.
+    static func answered(_ message: Data, path: String = socketPath) -> UInt8? {
+        do {
+            let socket = try LiveWindowsConnection(path: path, patience: 1)
+            defer { socket.close() }
+            try socket.send(message)
+            return try socket.receive(1)[0]
+        } catch { return nil }
+    }
+
     /// A request on the lease and the add-on's one-byte status for it: 0 when carried out.
     func request(_ data: Data) throws -> UInt8 {
         try send(data)
@@ -405,7 +487,10 @@ final class LiveWindowsConnection {
     static func reason(for status: UInt8) -> String {
         [1: "invalid request", 2: "reading native state", 3: "setting transform",
          4: "setting window level", 5: "ordering window", 6: "ordering input overlay",
-         7: "committing handoff", 8: "setting shadow", 9: "not a standard shadow", 10: "no window alpha"][Int(status)] ?? "status \(status)"
+         7: "committing handoff", 8: "setting shadow", 9: "not a standard shadow", 10: "no window alpha",
+         11: "no window shape", 12: "setting window shape", 20: "no Space calls", 21: "not a Desktop",
+         22: "a window didn't move", 23: "the Desktop has windows", 24: "the Desktop stayed",
+         25: "not a leased window"][Int(status)] ?? "status \(status)"
     }
 
     func acknowledge(_ data: Data) throws {

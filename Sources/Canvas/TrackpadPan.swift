@@ -5,7 +5,7 @@ import os
 /// drag would move them), and from inside an entered window, which brings the canvas back first. No
 /// modifier, no key first, and every direction pans, up included. A four-finger *tap* (four fingers
 /// down and up again without moving) shows everything, as Mission Control's swipe does; or, by
-/// Settings › Trackpad, a quick four-finger *flick* up does, Mission Control's own stroke, told from a
+/// Settings › How to use, a quick four-finger *flick* up does, Mission Control's own stroke, told from a
 /// drag up by its speed as the Mac tells them apart (swiped up slowly, Mission Control follows the
 /// fingers instead of opening). Thumb and three fingers spreading apart is Show Desktop, as on the Mac.
 ///
@@ -111,6 +111,14 @@ final class TrackpadPan: @unchecked Sendable {
     @MainActor private func followSetting() {
         let swipeUp = Settings.seeAllGesture == .swipeUp
         state.withLock { $0.swipeUpSeesAll = swipeUp }
+    }
+
+    /// Sunlight on or off (the menu bar switch). Off, the four fingers are the Mac's own again: the
+    /// Dock-control events that make Mission Control's and Spaces' swipes pass. (They were dropped
+    /// whenever four fingers were down, on or off, so with Sunlight off a four-finger swipe did nothing
+    /// at all: not a pan, and not Mission Control either.)
+    @MainActor func setActive(_ active: Bool) {
+        state.withLock { $0.active = active }
     }
 
     // MARK: Touches
@@ -270,8 +278,10 @@ struct TrackpadRecognizer {
     /// The drag is held level (dy = 0) or plumb (dx = 0), decided as it begins; nil for a free
     /// (diagonal) drag.
     var lock: Lock?
-    /// Settings › Trackpad: a quick flick up is See All, instead of a tap.
+    /// Settings › How to use: a quick flick up is See All, instead of a tap.
     var swipeUpSeesAll = false
+    /// Sunlight is on: the four fingers are the canvas's, and the system's own swipes are held off.
+    var active = true
     /// The fingers moved or spread while no drag was under way: not a tap any more.
     var stirred = false
     /// Where the centroid was and when, as the drag began; a flick is measured from there.
@@ -296,7 +306,7 @@ struct TrackpadRecognizer {
                          now: CFAbsoluteTime) -> [TrackpadPan.Phase] {
         if let followed = self.device, followed != device { return [] }
         if ids.count == 4 { fourFingerTouch = true } else if ids.isEmpty { fourFingerTouch = false }
-        if fourFingerTouch { dropDockControlUntil = now + TrackpadPan.dockTail }
+        if fourFingerTouch, active { dropDockControlUntil = now + TrackpadPan.dockTail }
         let began = touchBegan ?? now
         if ids.isEmpty { touchBegan = nil } else if touchBegan == nil { touchBegan = now }
         // A finger landed or lifted: whatever was under way is over. Four fingers that landed together,

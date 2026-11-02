@@ -55,18 +55,21 @@ Desktop all land on it. So it's still your Mac. It just has room now.
   were closed.
 - 🖥️ **Your desktop comes along.** Finder's desktop files are the canvas floor (open, drag, rename, drag into
   a window), widgets sit beside your windows, and Show Desktop (F11 or the four-finger spread) flies there.
+- 🖼️ **Picture in Picture, for any window.** Right-click a window › Picture in Picture (⌃⌥P) and it flies
+  into a corner as a small live tile, like a video does, while you work in anything else: a call, a video,
+  a timer. Drag it between corners, tuck it off the side; a click brings it back full size.
 - 🫥 **Nothing gets lost.** Hidden and minimized windows keep their spot, shown dashed in the minimap.
 - 🌄 **Backgrounds** from your wallpaper, Photos, files, colours or gradients, with blur and dim that follow
   the zoom.
 - 🦸 **Takeover mode.** Hides the Dock and makes ⌘Tab, Mission Control and Show Desktop work on the canvas.
   Quit, and every setting it touched goes back how it was.
-- 🧪 **Experimental**, off until you flip them in Settings › General › Experimental: Arrange and Tidy,
+- 🧪 **Experimental**, off until you flip them in Settings › Experimental: Arrange and Tidy,
   strip mode (every app on one endless strip), and a canvas on every display.
 
 ## Getting around
 
 <p align="center">
-  <img src="docs/images/gestures.png" width="820" alt="Settings › Trackpad acting out two gestures: a click bringing a window forward, and the four-finger spread for Show Desktop">
+  <img src="docs/images/gestures.png" width="820" alt="Settings › How to use acting out two gestures: a click bringing a window forward, and the four-finger spread for Show Desktop">
 </p>
 
 | To | Trackpad | Keys |
@@ -78,12 +81,13 @@ Desktop all land on it. So it's still your Mac. It just has room now.
 | See everything, and back in | four-finger tap | Mission Control key (F3) |
 | Show Desktop | four-finger spread (thumb and three fingers) | F11 |
 | Move & Resize a window | | ⌃⌥ ← → ↑ ↓ halves, U I J K quarters, D F G thirds, ⏎ full, C centre |
+| Picture in Picture | right-click a window › Picture in Picture | ⌃⌥P |
 | Save / restore a layout | | ⌘S / ⌘1 – ⌘9 |
-| Settings · Instructions | | ⌘, · ⌘? |
+| Settings · How to use | | ⌘, · ⌘? |
 
 Everything else lives in the **sun icon in the menu bar** (Sunlight has no Dock icon): the on/off switch,
-the minimap, your layouts, and More for the rest. **Settings › Trackpad** acts out every gesture, and
-**Instructions** (⌘?) is the whole manual in one window. The full list of controls is in
+the minimap, your layouts, and More for the rest. **Settings › How to use** (⌘?) is the whole manual: the basics,
+every gesture acted out, placing windows and every key. The full list of controls is in
 [docs/how-it-works.md](docs/how-it-works.md#controls).
 
 ## Two ways to run it
@@ -128,8 +132,9 @@ itself (it asks first). [INSTALL.md](INSTALL.md) covers every step, checking the
 - A Mac with **Apple silicon** (M1 or later)
 - **macOS 15** Sequoia or later
 - An administrator account, for live windows
+- **Stage Manager off**. Setup turns it off for you, and Sunlight turns it back on when it quits
 - One canvas on the **main display** by default; the others show where their windows are. A canvas on
-  every display is experimental (Settings › General › Experimental › Multiple displays).
+  every display is experimental (Settings › Experimental › Multiple displays).
 
 ## Beta heads-up
 

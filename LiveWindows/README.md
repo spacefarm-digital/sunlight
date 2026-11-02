@@ -175,6 +175,47 @@ leaving it out, a release), handed off (the entered window and the ones kept on 
 ending. A window the lease doesn't hold is passed over. Older add-ons open and close windows with
 transforms alone.
 
+Since sunlight-42 a lease can name the windows pinned to the screen (opcode `0x76`: a count, then their
+IDs; the list replaces the last one, and one that doesn't match its length is refused with status 1,
+the lease going on). A pinned window the lease holds stays on show as it is, at the canvas's transform,
+through a handoff (above the entered window and the ones kept with it, at level 3, `SUNBEAM_PINNED`) and
+through a release for an app that took the front (above that app's windows). It isn't moved natively,
+ordered or settled, and the lease forgets it as it forgets the entered window; the next lease's frame
+takes it back as any window found at a level of the canvas's (its native place read off its bounds, its
+own level from the lifted list). With no app in front (the lease's end, the canvas going dormant) a
+pinned window goes back with the rest.
+
+Since sunlight-55 the add-on also does what takeover needs to keep one Desktop per display, which with
+SIP on the window server takes only from the Dock (`spaces-probe.m`): opcode `0x78`, on a connection of
+its own and answered with one status byte, either moves windows onto a Desktop (`1`, the Desktop's
+64-bit ID, a count, the window IDs; `SLSMoveWindowsToManagedSpace`, then yabai's workspace route for any
+that didn't go) or removes an empty Desktop (`2`, the ID; off it first if it's current, then
+`SLSSpaceDestroy`). It never removes a full-screen app's Space, the system's, a display's only Desktop or
+a Desktop with an app's window of its own (only windows from the normal level to under
+the Dock's count: every Desktop's menu bar, wallpaper and underbelly windows go with it). Its statuses are 20 to 24 (see `osax/spaces.h`, where the code is).
+
+Since sunlight-56 a lease also takes an anchor request (`SUNBEAM_ANCHOR`, `0x79`: a leased window and a
+native origin as two floats), answered with a status byte and where the window landed (two floats). The
+window's real frame goes to the origin and its transform in force is set again, in one transaction with
+the transform after the move, so the picture stays where the canvas draws it: the window server takes a
+transform against the native origin the window has when it is set, and a move alone shifts the picture
+by the move. The canvas uses it for a window used where it's drawn, at a zoom, as a pinch or a scroll of
+the app's own starts: the window server maps an event's location through the scale, but
+`NSEvent.mouseLocation` is the raw pointer, which an app reads against its real frame, so a zoom around
+the pointer (Preview's) anchored wherever the pointer fell on the real, unscaled frame. Put where the
+spot under the pointer on the drawn window is under the pointer on the real one too, the two agree at
+that point. The origin isn't clamped under the menu bar (the real frame isn't what is seen); the
+answer says where it landed in case the window server or the app clamped it. Status 25: not a window
+this lease holds. Since sunlight-57 the lease's record of the window's own transform follows the move, so
+a release (at a zoom, say) puts the window back where it now is rather than where the lease found it.
+
+Since sunlight-43 a frame that names a window the window server can't describe any more (closed between
+the canvas's listing and the frame, as the owner read catches, or between the owner read and the
+transform and level reads, which it didn't) leaves that window out, as it does one whose owner read
+failed, and goes on with the rest. Before, the second case failed the frame with status 2, which ended
+the lease: every window on the canvas went back to full size for a moment, then the canvas took a new
+lease and scaled them all again.
+
 The driver has one pending-frame slot on a serial worker. It replaces stale pending frames, rather
 than queuing an animation history. Connect/send/receive waits are bounded at 250 ms; frames carry an
 acknowledgment. A 0.5-second idle heartbeat keeps the lease alive. Disconnect, malformed input, or

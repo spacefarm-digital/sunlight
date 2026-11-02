@@ -67,6 +67,9 @@ enum TileMenu {
     /// Strip mode on and off, ⌃⌥S. While it's on, ⌃⌥ ← → ↑ ↓ step along the strip instead of tiling.
     static let stripKeyCode = kVK_ANSI_S
     static let stripKey = "s"
+    /// ⌃⌥P: the window into Picture in Picture, or out of it (`PictureInPicture`), from the canvas or from inside it.
+    static let pipKeyCode = kVK_ANSI_P
+    static let pipKey = "p"
 
     /// The keys as the explainer and the shortcuts menu show them.
     static let tileKeysSummary = "⌃⌥ ← → ↑ ↓ · U I J K · D F G · E T · ⏎ C"

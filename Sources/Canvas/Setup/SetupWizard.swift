@@ -54,7 +54,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
     private(set) var isShowing = false
     /// A page chosen by hand (Show the Recovery Steps; review mode's arrow keys) over the routed one.
     private var manual: SetupFlow.Page?
-    /// The tutorial played again from the Instructions: its last button closes the window.
+    /// The tutorial played again from Settings › How to use: its last button closes the window.
     private var replaying = false
     private let resumeHint: SetupFlow.Page?
     /// Review mode's fixed record, in place of what's stored.
@@ -168,7 +168,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    /// The Instructions' Play the Tutorial: the basics page from its first step, whatever else is left
+    /// Settings › How to use › Basics › Play the Tutorial: the basics page from its first step, whatever else is left
     /// to set up; finishing it closes the window.
     func showBasics() {
         replaying = true
@@ -521,8 +521,13 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
             let estimate = mac.liveWindowsSupported
                 ? "Setup takes about a minute to try Sunlight, and about five more, with one restart, for live windows."
                 : "Setup takes about a minute."
+            var paragraphs = ["Your canvas and your shortcuts, ready the moment you log in.", estimate]
+            // Said before it happens: Continue turns Stage Manager off, which moves every window on screen.
+            if StageManager.isOn() {
+                paragraphs.append("Stage Manager is on, and Sunlight needs it off: it hides windows into a strip whenever an app comes forward. Continue turns it off, and it comes back on when you quit Sunlight.")
+            }
             return SetupPageSpec(page: page, eyebrow: "Open at login", headline: "Start with Sunlight.",
-                                 paragraphs: ["Your canvas and your shortcuts, ready the moment you log in.", estimate], extra: .loginItem,
+                                 paragraphs: paragraphs, extra: .loginItem,
                                  primary: action("primary", "Continue") { [weak self] in self?.chooseLoginItem() }, note: note)
 
         case .accessibility:
@@ -776,6 +781,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
         guard !review else { return step(1) }
         SetupRecord.loginItemChosen = true
         journal("Open at login: \(model.loginItem ? "on" : "off")")
+        StageManager.turnOff(why: "setup")
         if model.loginItem {
             DispatchQueue.global(qos: .utility).async { LoginItem.register() }
         }

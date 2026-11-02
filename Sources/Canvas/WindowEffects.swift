@@ -27,7 +27,7 @@ enum WindowEffect: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// Settings › Windows › Opening and closing.
+    /// Settings › Motion › Opening and closing.
     var title: String {
         switch self {
         case .automatic: return "Automatic"

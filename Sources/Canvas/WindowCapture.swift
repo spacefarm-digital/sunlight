@@ -287,11 +287,18 @@ enum OneShotCapture {
     static var skyLightAvailable: Bool { skyLight != nil }
 
     /// Always calls back on the main actor, with nil when the capture failed or isn't available. `seam`
-    /// asks for backing (2x) detail for the handoff seam; a routine tick takes nominal (1x). Detail only
-    /// steers the SkyLight path — the ScreenCaptureKit path keeps its native-resolution behaviour.
+    /// asks for the handoff seam's full-detail frame: ScreenCaptureKit's native resolution whatever the
+    /// method (SkyLight's 2x only where ScreenCaptureKit's one-shot isn't available); a routine tick
+    /// takes the chosen method, SkyLight at nominal (1x).
     @MainActor
     static func capture(_ window: SCWindow, seam: Bool = false, completion: @escaping @MainActor (CGImage?) -> Void) {
-        guard Settings.captureMethod == .skyLight, skyLight != nil else {
+        // The seam's frame always goes through ScreenCaptureKit where it can. SkyLight's backing (2x)
+        // capture came back framed differently from the window (content scaled up and shifted inside the
+        // proxy's outline), and the proxy stretches whatever it holds to its outline: the window showed
+        // re-laid-out for the few frames between the flight landing and the real window coming forward.
+        // ScreenCaptureKit's is the window as it is; ~20 ms more, well inside the flight.
+        let skyLightServes = !seam || !screenCaptureKitAvailable
+        guard Settings.captureMethod == .skyLight, skyLight != nil, skyLightServes else {
             screenCaptureKitCapture(window, completion: completion)
             return
         }

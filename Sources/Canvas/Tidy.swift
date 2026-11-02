@@ -7,7 +7,7 @@ import Foundation
 /// points). Pure: items in, rects out; the controller gathers the windows, resizes the real ones and
 /// animates.
 enum Tidy {
-    /// Settings › Arrange › Tidy › Sizes.
+    /// Settings › Experimental › Arranging › Sizes.
     enum Sizing: String, CaseIterable, Sendable {
         /// Nothing is resized: columns as wide as their widest window, rows as tall as their tallest,
         /// each window at the top-left of its cell.
@@ -42,7 +42,7 @@ enum Tidy {
         }
     }
 
-    /// Settings › Arrange › Tidy › Spacing, in tile gaps: the gap itself, four of them, twelve.
+    /// Settings › Experimental › Arranging › Spacing, in tile gaps: the gap itself, four of them, twelve.
     enum Spacing: String, CaseIterable, Sendable {
         case tight, normal, roomy
 

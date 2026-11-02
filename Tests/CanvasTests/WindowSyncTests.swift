@@ -50,8 +50,12 @@ final class WindowSyncTests: XCTestCase {
         XCTAssertEqual(verdict(isWidget: true, listed: moved), .move)
     }
 
-    func testInCaptureModeTheListingIsTheTruthForEveryWindow() {
-        XCTAssertEqual(verdict(capturing: true, listed: moved), .move)
-        XCTAssertEqual(verdict(capturing: true, transformed: false, listed: resized), .move)
+    func testInCaptureModeACanvasOwnedWindowTakesOnlyItsSize() {
+        // The window server's frame can differ from the app's own (Accessibility, which places the
+        // window at the seam and reads it back) by a constant: not a move.
+        XCTAssertEqual(verdict(capturing: true, listed: moved), .size)
+        XCTAssertEqual(verdict(capturing: true, listed: resized), .size)
+        XCTAssertEqual(verdict(owner: .user, capturing: true, listed: moved), .move)
+        XCTAssertEqual(verdict(isWidget: true, capturing: true, listed: moved), .move)
     }
 }

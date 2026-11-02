@@ -197,3 +197,23 @@ extension AXUIElement {
         return CFBooleanGetValue((ref as! CFBoolean))
     }
 }
+
+extension AXUIElement {
+    /// Whether a press here is on a control the app drags itself: a scroll bar or its thumb, a slider,
+    /// a pane divider, a resize handle. A drag anywhere else moves the window on the canvas.
+    var isDraggedControl: Bool {
+        guard let role = string(kAXRoleAttribute) else { return false }
+        let controls: Set<String> = [kAXScrollBarRole, kAXSliderRole, kAXValueIndicatorRole, kAXSplitterRole,
+                                     kAXHandleRole, kAXGrowAreaRole, kAXIncrementorRole, kAXColorWellRole]
+        if controls.contains(role) { return true }
+        // A scroll bar's thumb reports as its own kind of element in some apps; its parent tells.
+        return parent?.string(kAXRoleAttribute) == kAXScrollBarRole
+    }
+
+    /// The deepest element at a global point (top-left origin), asked of the app.
+    static func element(at point: CGPoint, pid: pid_t) -> AXUIElement? {
+        var ref: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid), Float(point.x), Float(point.y), &ref) == .success else { return nil }
+        return ref
+    }
+}

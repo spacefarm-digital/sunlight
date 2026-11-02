@@ -57,6 +57,15 @@ final class CanvasView: NSView {
     var onMinimize: ((WindowProxy) -> Void)?
     /// Right-click › Hide: the window's app, as ⌘H would.
     var onHideApp: ((WindowProxy) -> Void)?
+    /// Right-click › Picture in Picture / Leave Picture in Picture (`PictureInPicture`).
+    var onTogglePip: ((WindowProxy) -> Void)?
+    /// A tile dragged, resized or pinched and settled (in a corner, or tucked): its place changed.
+    var onPipMoved: ((WindowProxy) -> Void)?
+    /// A double-click on a tile: the window returns to 1:1 where the tile is, the camera staying put.
+    var onPipReturn: ((WindowProxy) -> Void)?
+    /// A tile drawn somewhere new this frame (a drag, a resize, a flight): the live windows follow at
+    /// once, and the chrome panel with them.
+    var onPipChanged: (() -> Void)?
     /// A click on a widget, at a world point; nil for the widget as a whole (⏎).
     var onPress: ((WindowProxy, CGPoint?) -> Void)?
     /// "Add Widgets…" from the context menu.
@@ -92,6 +101,12 @@ final class CanvasView: NSView {
     var onResize: ((_ proxy: WindowProxy, _ anchor: CGPoint, _ finished: Bool) -> Void)?
     /// Whether a screen point is under the overlay (the minimap): nothing there is hovered or entered.
     var isCovered: ((CGPoint) -> Bool)?
+    /// Whether a window is in use where it's drawn (`Settings.useScaledWindows`) with its app in front:
+    /// the canvas isn't key then, but it's up as it is, and the camera is still the user's to move.
+    var isUsingScaledWindow: (() -> Bool)?
+
+    /// Whether the camera is the user's: the canvas is key, or stays up for a window used where it's drawn.
+    private var cameraIsFree: Bool { window?.isKeyWindow == true || isUsingScaledWindow?() == true }
     /// A window or widget was dragged somewhere new and let go (it may still be settling onto the grid).
     var onMoved: ((WindowProxy) -> Void)?
     /// Right-click › Move & Resize on a window.
@@ -202,7 +217,7 @@ final class CanvasView: NSView {
     static let springDelay: TimeInterval = 0.6
     /// Labels and floating controls: counter-scaled chrome, above every window.
     private let chromeLayer = CALayer()
-    /// The HUD: the zoom percentage. The keys are in Settings › Shortcuts (`ShortcutReference`).
+    /// The HUD: the zoom percentage. The keys are in Settings › How to use › Keyboard (`ShortcutReference`).
     private let hudZoom = CATextLayer()
     private var hudPercent = -1
     /// The zoom the chrome was last laid out for; a pan leaves it alone.
@@ -230,6 +245,23 @@ final class CanvasView: NSView {
         var guideKeys = Set<GuideKey>()
     }
     private var dragging: Drag?
+    /// A press on a tile: a click until the pointer travels `dragSlop`, then a move of the tile itself,
+    /// in screen points, with the speed to fling it at.
+    private struct PipDrag {
+        let proxy: WindowProxy
+        let grabOffset: CGPoint
+        let start: CGPoint
+        var moved = false
+        var velocity = Magnetism.Velocity()
+    }
+    private var pipDrag: PipDrag?
+    /// A tile resized from an edge: the aspect kept, the opposite corner put, settled when let go.
+    private struct PipResize {
+        let proxy: WindowProxy
+        let edges: Resizing.Edges
+        let start: PipFrame
+    }
+    private var pipResize: PipResize?
     /// One alignment guide, as the hand feels it: which kind, and the coordinate it holds the window at.
     /// A guide's extent changes as the window slides along it; its coordinate doesn't.
     private struct GuideKey: Hashable {
@@ -320,6 +352,8 @@ final class CanvasView: NSView {
         let duration: CFTimeInterval
         /// Windows easing to new places on the canvas alongside the camera.
         let moves: [(proxy: WindowProxy, from: CGPoint, to: CGPoint)]
+        /// Something else on the same curve, each frame, with the eased progress.
+        let step: ((CGFloat) -> Void)?
         let completion: (() -> Void)?
     }
     private var animation: CameraAnimation?
@@ -458,7 +492,7 @@ final class CanvasView: NSView {
         guidesLayer.actions = ["path": NSNull(), "lineWidth": NSNull(), "position": NSNull(), "bounds": NSNull()]
         chromeLayer.addSublayer(guidesLayer)
 
-        // Just the zoom: the keys are in Settings › Shortcuts (`ShortcutReference`), not across the canvas.
+        // Just the zoom: the keys are in Settings › How to use › Keyboard (`ShortcutReference`), not across the canvas.
         hudZoom.anchorPoint = CGPoint(x: 0, y: 1)
         hudZoom.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         hudZoom.fontSize = 11
@@ -669,6 +703,7 @@ final class CanvasView: NSView {
         chromeLayer.addSublayer(proxy.label)
         chromeLayer.addSublayer(proxy.controls)
         proxy.layout(zoom: camera.zoom)
+        orderPipOnTop()   // a new window goes under the tiles
         if arriving { beginEntrance(proxy, context: WindowEffect.Context()) }
         onContentChanged?()
     }
@@ -715,6 +750,7 @@ final class CanvasView: NSView {
         proxiesLayer(for: proxy).addSublayer(proxy.layer)
         // Its sheets and prompts stay on top of it.
         for c in proxy.attachedChildren where proxies.contains(where: { $0 === c }) { bringToFront(c) }
+        orderPipOnTop()   // and the tiles over all
         onContentChanged?()
     }
 
@@ -732,7 +768,9 @@ final class CanvasView: NSView {
     /// The window under a world point. A sheet or prompt isn't a window of its own here: the press,
     /// hover or drag is its parent's (the real press still lands on the sheet, which is on top of it).
     func proxy(at worldPoint: CGPoint) -> WindowProxy? {
-        guard let hit = proxies.last(where: { !$0.leaving && !$0.closing && $0.worldRect.contains(worldPoint) }) else { return nil }
+        // A window in Picture in Picture is where its tile is, over everything; its home is empty ground.
+        if let tile = pipProxy(atScreen: camera.toScreen(worldPoint)) { return tile }
+        guard let hit = proxies.last(where: { !$0.leaving && !$0.closing && $0.pip == nil && $0.worldRect.contains(worldPoint) }) else { return nil }
         if let parentID = hit.attachedTo, let parent = proxies.first(where: { $0.windowID == parentID }) { return parent }
         return hit
     }
@@ -774,10 +812,232 @@ final class CanvasView: NSView {
                 p.layoutChrome(zoom: camera.zoom)
             }
         }
+        // A tile is drawn at its spot on the screen whatever the camera does: its effect and its chrome
+        // follow every camera, pans included.
+        for p in proxies where p.drawnPip != nil { layoutPip(p) }
         if let mark = openHereMark { openHereRing.position = layerPoint(camera.toScreen(mark)) }
         CATransaction.commit()
         onCameraChanged?()
         onViewportChanged?()
+    }
+
+    // MARK: Picture in Picture
+
+    /// The window drawn at its tile (`PictureInPicture.effect`), its chrome laid out there. Inside a
+    /// transaction with actions off, or on its own.
+    private func layoutPip(_ p: WindowProxy) {
+        guard let f = p.drawnPip else { return }
+        p.setEffect(PictureInPicture.effect(f, worldRect: p.worldRect, camera: camera), zoom: camera.zoom)
+        p.pipWorldRect = camera.toWorld(PictureInPicture.rect(f, size: p.worldRect.size))
+        p.layoutChrome(zoom: camera.zoom)
+    }
+
+    /// The controller put a window into Picture in Picture, took it out, or moved its tile: drawn
+    /// accordingly, above every other window while in PiP, and the live windows told.
+    func pipChanged(_ p: WindowProxy) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if p.drawnPip != nil {
+            layoutPip(p)
+        } else {
+            p.pipWorldRect = nil
+            p.setEffect(.identity, zoom: camera.zoom)
+            p.layoutChrome(zoom: camera.zoom)
+        }
+        CATransaction.commit()
+        orderPipOnTop()
+        onPipChanged?()
+        onContentChanged?()
+    }
+
+    /// The tiles above the rest, in their own order: a tile on the screen is over whatever the camera
+    /// brings under it, and the live frames send them last, just under the canvas's chrome.
+    private func orderPipOnTop() {
+        let tiles = proxies.filter { $0.pip != nil }
+        guard let lowest = tiles.first, let i = proxies.firstIndex(where: { $0 === lowest }),
+              proxies[i...].contains(where: { $0.pip == nil }) else { return }
+        proxies.removeAll { $0.pip != nil }
+        proxies += tiles
+        for p in tiles {
+            p.layer.removeFromSuperlayer()
+            proxiesLayer(for: p).addSublayer(p.layer)
+        }
+    }
+
+    /// A tile on its way somewhere on a spring, the camera staying put: into its corner, back to 1:1,
+    /// home, behind an edge. `pipShown` follows each frame and the real window with it.
+    private struct PipFlight {
+        let from: PipFrame
+        let to: PipFrame
+        /// Progress from 0 to 1 along the way, as a spring's offset from 1 (a fling starts it moving).
+        let spring: Spring
+        let start: CFTimeInterval
+        let completion: (() -> Void)?
+    }
+    private var pipFlights: [ObjectIdentifier: PipFlight] = [:]
+
+    /// Flies a tile from where it's drawn now to `to`. `velocity` (screen points per second) carries a
+    /// fling into the spring; `response` and `damping` are the spring's (`PictureInPicture.Reference`).
+    /// A flight already under way is re-aimed from where it is. `completion` once there, or never if
+    /// re-aimed or cancelled. With Reduce Motion on, the tile just lands.
+    func flyPip(_ p: WindowProxy, to: PipFrame, velocity: CGVector = .zero,
+                response: CGFloat = PictureInPicture.Reference.snapResponse,
+                damping: CGFloat = PictureInPicture.Reference.snapDamping, completion: (() -> Void)? = nil) {
+        let from = p.drawnPip ?? to
+        let key = ObjectIdentifier(p)
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || from == to {
+            pipFlights.removeValue(forKey: key)
+            p.pipShown = to
+            pipChanged(p)
+            completion?()
+            return
+        }
+        // The spring runs along the straight way from `from` to `to`; a fling's speed along that way
+        // becomes its starting velocity (in units of the way's length), crosswise speed is dropped.
+        let dx = to.origin.x - from.origin.x, dy = to.origin.y - from.origin.y
+        let length = max(1, hypot(dx, dy))
+        let along = (velocity.dx * dx + velocity.dy * dy) / length / length
+        pipFlights[key] = PipFlight(from: from, to: to,
+                                    spring: Spring(x0: -1, v0: along, response: response, damping: damping),
+                                    start: CACurrentMediaTime(), completion: completion)
+        p.pipShown = from
+        startDisplayLink()
+    }
+
+    /// Drops a tile's flight where it is, `pipShown` staying as drawn (the controller settles it).
+    func cancelPipFlight(_ p: WindowProxy) {
+        pipFlights.removeValue(forKey: ObjectIdentifier(p))
+    }
+
+    var isFlyingPip: Bool { !pipFlights.isEmpty }
+
+    private func tickPip(at now: CFTimeInterval) {
+        guard !pipFlights.isEmpty else { return }
+        var done: [(WindowProxy, PipFlight)] = []
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for p in proxies {
+            guard let f = pipFlights[ObjectIdentifier(p)] else { continue }
+            let (x, v) = f.spring.evaluate(at: CGFloat(now - f.start))
+            if abs(x) < 0.001, abs(v) < 0.01 {
+                p.pipShown = f.to
+                done.append((p, f))
+            } else {
+                p.pipShown = PictureInPicture.mix(f.from, f.to, 1 + x)
+            }
+            layoutPip(p)
+        }
+        CATransaction.commit()
+        onPipChanged?()
+        for (p, f) in done {
+            pipFlights.removeValue(forKey: ObjectIdentifier(p))
+            f.completion?()
+        }
+    }
+
+    /// The window whose tile is under a screen point, topmost first.
+    private func pipProxy(atScreen point: CGPoint) -> WindowProxy? {
+        proxies.last { p in
+            guard let f = p.drawnPip, !p.leaving, !p.closing else { return false }
+            return PictureInPicture.rect(f, size: p.worldRect.size).contains(point)
+        }
+    }
+
+    /// Tiles are placed and dragged in view coordinates; the controller tells the view the display's
+    /// visible part.
+    var pipArea: (() -> CGRect)?
+    private var visibleForPip: CGRect { pipArea?() ?? CGRect(origin: .zero, size: bounds.size) }
+
+    /// A tile let go (a drag's end, a resize's end, a pinch's end): it springs to the corner it's heading
+    /// for, or tucks behind an edge it was dragged past, and the controller hears where it settled.
+    private func settlePip(_ p: WindowProxy, velocity: CGVector = .zero, freely: Bool = false) {
+        guard let f = p.drawnPip else { return }
+        let size = p.worldRect.size, visible = visibleForPip
+        let target: PipFrame
+        var response = PictureInPicture.Reference.snapResponse, damping = PictureInPicture.Reference.snapDamping
+        if freely {
+            // ⌘ held: left where it was dropped, just kept on the screen.
+            p.pipTucked = nil
+            target = PictureInPicture.clamped(f, size: size, visible: visible)
+        } else if let side = PictureInPicture.tuck(of: f, velocity: velocity, size: size, visible: visible) {
+            p.pipTucked = side
+            target = PictureInPicture.tucked(f, behind: side, size: size, visible: visible)
+            response = PictureInPicture.Reference.tuckResponse
+            damping = PictureInPicture.Reference.tuckDamping
+        } else {
+            p.pipTucked = nil
+            let corner = PictureInPicture.corner(for: f, velocity: velocity, size: size, visible: visible)
+            target = PictureInPicture.frame(in: corner, scale: f.scale, size: size, visible: visible)
+            p.lastPipCorner = corner
+        }
+        // Drawn where it was let go until the spring moves it: the flight starts from `drawnPip`, so the
+        // resting frame is set only once that is held in `pipShown` (set first, it was already there).
+        p.pipShown = f
+        p.pip = target
+        flyPip(p, to: target, velocity: velocity, response: response, damping: damping) { [weak self, weak p] in
+            guard let self, let p else { return }
+            p.pipShown = nil
+            self.pipChanged(p)
+            Haptics.Player.shared.play(.detent, key: ObjectIdentifier(p))
+            self.onPipMoved?(p)
+        }
+    }
+
+    /// A tucked tile's tab clicked, or the tile dragged back on: it springs to the corner on its side.
+    func untuckPip(_ p: WindowProxy) {
+        guard let side = p.pipTucked, let f = p.drawnPip else { return }
+        p.pipTucked = nil
+        let target = PictureInPicture.untucked(f, from: side, size: p.worldRect.size, visible: visibleForPip)
+        p.lastPipCorner = PictureInPicture.corner(of: target, size: p.worldRect.size, visible: visibleForPip)
+        p.pipShown = f   // the spring starts from behind the edge (see `settlePip`)
+        p.pip = target
+        flyPip(p, to: target) { [weak self, weak p] in
+            guard let self, let p else { return }
+            p.pipShown = nil
+            self.pipChanged(p)
+            self.onPipMoved?(p)
+        }
+    }
+
+    /// The tile's rect on screen (view coordinates) as drawn now, for the chrome panel.
+    func pipRect(of p: WindowProxy) -> CGRect? {
+        p.drawnPip.map { PictureInPicture.rect($0, size: p.worldRect.size) }
+    }
+
+    /// A drag of a tile begun from its chrome panel rather than the canvas, at a view point.
+    func beginPipDrag(_ p: WindowProxy, at screenPoint: CGPoint) {
+        guard p.drawnPip != nil, pipDrag == nil, dragging == nil, resizing == nil else { return }
+        cancelPipFlight(p)
+        if let shown = p.pipShown { p.pip = shown; p.pipShown = nil }
+        let r = PictureInPicture.rect(p.pip!, size: p.worldRect.size)
+        pipDrag = PipDrag(proxy: p, grabOffset: CGPoint(x: screenPoint.x - r.minX, y: screenPoint.y - r.minY), start: screenPoint)
+    }
+
+    func movePipDrag(to screenPoint: CGPoint, timestamp: TimeInterval) {
+        guard var d = pipDrag, var f = d.proxy.pip else { return }
+        if !d.moved {
+            guard hypot(screenPoint.x - d.start.x, screenPoint.y - d.start.y) >= CanvasView.dragSlop else { return }
+            d.moved = true
+            d.proxy.pipTucked = nil
+        }
+        d.velocity.add(screenPoint, at: timestamp)
+        pipDrag = d
+        f = PictureInPicture.dragged(f, to: CGPoint(x: screenPoint.x - d.grabOffset.x, y: screenPoint.y - d.grabOffset.y),
+                                     size: d.proxy.worldRect.size, visible: visibleForPip)
+        d.proxy.pip = f
+        pipChanged(d.proxy)
+    }
+
+    /// The drag's end: true when it had moved (the tile settles); false for a click.
+    @discardableResult
+    func endPipDrag(timestamp: TimeInterval, freely: Bool = false) -> Bool {
+        guard let d = pipDrag else { return false }
+        pipDrag = nil
+        if d.moved {
+            settlePip(d.proxy, velocity: d.velocity.release(at: timestamp), freely: freely)
+            return true
+        }
+        return false
     }
 
     /// A top-left view point in the (bottom-left) root layer's coordinates.
@@ -927,7 +1187,8 @@ final class CanvasView: NSView {
     /// The camera that frames every window; nil when the canvas is empty. The desktop (its files and
     /// widgets) is left out so See All is as close as the windows allow; with no windows, it's what's framed.
     var overviewCamera: Camera? {
-        var rects = proxies.filter { $0.kind == .window }.map(\.worldRect)
+        // Tiles in Picture in Picture are on the screen wherever the camera goes: their homes needn't be in view.
+        var rects = proxies.filter { $0.kind == .window && $0.pip == nil }.map(\.worldRect)
         if rects.isEmpty {
             rects = proxies.map(\.worldRect)
             if let files = desktopFilesRect { rects.append(files) }
@@ -946,12 +1207,13 @@ final class CanvasView: NSView {
     /// the two things Core Animation's implicit transform interpolation gets subtly wrong.
     /// `moving` eases windows to new world origins over the same curve.
     func animateCamera(to target: Camera, duration: CFTimeInterval = CanvasView.cameraDuration,
-                       moving: [(proxy: WindowProxy, to: CGPoint)] = [], completion: (() -> Void)? = nil) {
+                       moving: [(proxy: WindowProxy, to: CGPoint)] = [], step: ((CGFloat) -> Void)? = nil,
+                       completion: (() -> Void)? = nil) {
         interruptMotion()
         settleWhenStill = false
         animation = CameraAnimation(from: camera, to: target, start: CACurrentMediaTime(), duration: duration,
                                     moves: moving.map { ($0.proxy, $0.proxy.worldRect.origin, $0.to) },
-                                    completion: completion)
+                                    step: step, completion: completion)
         startDisplayLink()
         onViewportChanged?()   // the target is known from the first frame
     }
@@ -993,6 +1255,10 @@ final class CanvasView: NSView {
     /// At 1:1 a press on a window behind the one in use is that window's, as on the desktop: it comes
     /// through on the click that brings the canvas forward instead of needing a second one.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        // Using windows at any zoom, another app is in front while Sunlight still shows the canvas: a
+        // drag on a window's title strip (or anywhere with ⌘ ⌥) moves it on the first press.
+        if let event, Settings.useScaledWindows, showsRealWindows, !isOneToOne, isCovered?(topLeftPoint(event)) != true,
+           proxy(at: camera.toWorld(topLeftPoint(event)))?.kind == .window { return true }
         guard let event, isOneToOne, isCovered?(topLeftPoint(event)) != true else { return false }
         return proxy(at: camera.toWorld(topLeftPoint(event)))?.kind == .window
     }
@@ -1087,7 +1353,7 @@ final class CanvasView: NSView {
     }
 
     private func stopLinkIfIdle() {
-        guard animation == nil, flight == nil, entrances.isEmpty, magnet == nil,
+        guard animation == nil, flight == nil, entrances.isEmpty, magnet == nil, pipFlights.isEmpty,
               pending.isEmpty, coast == nil, zoomCoast == nil,
               CACurrentMediaTime() - lastInput > CanvasView.inputLinger else { return }
         link?.invalidate()
@@ -1108,6 +1374,7 @@ final class CanvasView: NSView {
         tickCamera(at: now)
         tickEntrances(at: now)
         tickMagnet(at: now)
+        tickPip(at: now)
         settleIfStill(at: now)   // may start a move of its own, which keeps the link
         lastTick = now
         perf.tick(apply: CACurrentMediaTime() - began, coalesced: coalesced, missed: missed)
@@ -1160,6 +1427,7 @@ final class CanvasView: NSView {
             m.proxy.place(at: raw >= 1 ? m.to
                 : CGPoint(x: m.from.x + (m.to.x - m.from.x) * s, y: m.from.y + (m.to.y - m.from.y) * s))
         }
+        a.step?(raw >= 1 ? 1 : s)
         applyCamera()
         if raw >= 1 {
             finishMotion()
@@ -1169,7 +1437,7 @@ final class CanvasView: NSView {
 
     // MARK: Entrances
 
-    /// The effect a window gets now, from Settings › Windows › Opening and closing.
+    /// The effect a window gets now, from Settings › Motion › Opening and closing.
     private func effectStyle(for context: WindowEffect.Context) -> WindowEffect.Style? {
         WindowEffect.style(for: Settings.windowEffect, context: context,
                            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
@@ -1840,6 +2108,11 @@ final class CanvasView: NSView {
     /// its floating controls are.
     private func resizeEdges(of p: WindowProxy?, at screenPoint: CGPoint) -> Resizing.Edges {
         guard let p, p.kind == .window, p.control(at: camera.toWorld(screenPoint)) == nil else { return [] }
+        // A tile resizes from its edges too, where it's drawn; not while tucked (its tab is the grip).
+        if let f = p.drawnPip {
+            guard p.pipTucked == nil, pipFlights[ObjectIdentifier(p)] == nil else { return [] }
+            return Resizing.edges(at: screenPoint, in: PictureInPicture.rect(f, size: p.worldRect.size))
+        }
         return Resizing.edges(at: screenPoint, in: camera.toScreen(p.worldRect))
     }
 
@@ -1959,6 +2232,49 @@ final class CanvasView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         updateHover(at: topLeftPoint(event))
+        if let p = passThroughTarget() { onPassThrough?(p) }
+    }
+
+    /// "Use windows at any zoom" (`Settings.useScaledWindows`): the pointer is over a window's content
+    /// and the canvas should step aside for it, so the press, scroll or keys go to the app where the
+    /// window is drawn. The window server hit-tests through a window's scale, so nothing is mapped here.
+    var onPassThrough: ((WindowProxy) -> Void)?
+    /// A click on a window's title strip while windows are used at any zoom: focus it, no zoom.
+    var onFocus: ((WindowProxy) -> Void)?
+    /// With the clicks swapped (`Settings.scaledClickZooms`), the second click of a double-click: the
+    /// first click's way in is dropped and the window is focused where it was.
+    var onClickFocus: ((WindowProxy) -> Void)?
+
+    /// Windows are used where they're drawn (`Settings.useScaledWindows`, with live windows).
+    var scaledWindowsInUse: Bool { Settings.useScaledWindows && showsRealWindows }
+
+    /// A click's way in began outside the view (through the press tap): a second click re-aims it.
+    func noteClickEntering(_ p: WindowProxy) { clickEntering = p }
+
+    /// The title strip a window keeps for the canvas (drag to move it, its controls): its title bar,
+    /// in its own points, and never less than `passThroughGrip` on screen however far out the zoom.
+    static let passThroughTitleStrip: CGFloat = 28
+    static let passThroughGrip: CGFloat = 16
+
+    /// The window whose content is under the pointer, when the canvas would let the pointer through to
+    /// it: live windows, not at 1:1 (the press there is passed on already, `onUse`), nothing moving, no
+    /// ⌥ ⌘ ⌃ held (they pan and zoom over windows), off the title strip, the edges, its controls and
+    /// whatever covers the canvas. Asked on every move while the pointer is through, too.
+    func passThroughTarget() -> WindowProxy? {
+        guard Settings.useScaledWindows, showsRealWindows, !isOneToOne, !isBusy, !panning, coast == nil,
+              zoomCoast == nil, floorPress == nil, !showsDesktop, NSEvent.pressedMouseButtons == 0,
+              NSEvent.modifierFlags.isDisjoint(with: [.option, .command, .control]) else { return nil }
+        let screenPoint = pointerTopLeft
+        guard bounds.contains(CGPoint(x: screenPoint.x, y: bounds.height - screenPoint.y)),
+              isCovered?(screenPoint) != true else { return nil }
+        let worldPoint = camera.toWorld(screenPoint)
+        // A tile in Picture in Picture is drawn at its corner, not where the camera has its home: the canvas
+        // keeps the pointer there.
+        guard let p = proxy(at: worldPoint), p.kind == .window, p.usesRealWindow, p.away == nil, !p.heldBack,
+              !p.leaving, !p.closing, p.drawnPip == nil, p.control(at: worldPoint) == nil,
+              worldPoint.y >= p.worldRect.minY + max(Self.passThroughTitleStrip, Self.passThroughGrip / camera.zoom),
+              resizeEdges(of: p, at: screenPoint).isEmpty else { return nil }
+        return p
     }
 
     /// Right-click on empty canvas or a widget: the widget items of the desktop's own menus, and on
@@ -2073,6 +2389,14 @@ final class CanvasView: NSView {
     private func tileMenu(for proxy: WindowProxy) -> NSMenu {
         let menu = NSMenu()
         menuProxy = proxy
+        // Picture in Picture first: it's about this window on this screen (⌃⌥P does the same).
+        let pip = NSMenuItem(title: proxy.pip == nil ? "Picture in Picture" : "Leave Picture in Picture", action: #selector(togglePip(_:)),
+                             keyEquivalent: TileMenu.pipKey)
+        pip.keyEquivalentModifierMask = TileMenu.modifiers
+        pip.target = self
+        pip.representedObject = proxy
+        menu.addItem(pip)
+        menu.addItem(.separator())
         for item in TileMenu.placementItems(target: self, actions: placementActions,
                                             represent: { TileChoice(proxy: proxy, preset: $0) }) {
             menu.addItem(item)
@@ -2122,6 +2446,11 @@ final class CanvasView: NSView {
     @objc private func moveToDisplay(_ sender: NSMenuItem) {
         guard let choice = sender.representedObject as? DisplayChoice else { return }
         onMoveToDisplay?(choice.proxy, choice.index)
+    }
+
+    @objc private func togglePip(_ sender: NSMenuItem) {
+        guard let p = sender.representedObject as? WindowProxy else { return }
+        onTogglePip?(p)
     }
 
     @objc private func minimizeWindow(_ sender: NSMenuItem) {
@@ -2201,7 +2530,8 @@ final class CanvasView: NSView {
         clickEntering = nil
         if event.clickCount >= 2, let p = entering {
             dragging = nil
-            onHandoff?(p)
+            // Using windows at any zoom with the clicks swapped, the double-click focuses it where it was.
+            if scaledWindowsInUse, Settings.scaledClickZooms { onClickFocus?(p) } else { onHandoff?(p) }
             return
         }
         let ground = floorHit(at: worldPoint)
@@ -2229,6 +2559,34 @@ final class CanvasView: NSView {
                 if control == .zoom { startZoomHold(p) }
                 return
             }
+            // A tile in Picture in Picture: a click (or a double-click) returns the window to 1:1 where
+            // the tile is (the click on the release, `mouseUp`); a drag moves the tile (tucked, the tab
+            // brings it back); a press on an edge resizes it. Most presses never get here: the tile's
+            // chrome panel takes them (`PipChrome`); the edges, and a tile on its way somewhere, are the
+            // canvas's.
+            if p.drawnPip != nil {
+                dragging = nil
+                if event.clickCount >= 2 {
+                    pipDrag = nil
+                    onPipReturn?(p)
+                    return
+                }
+                if p.pipTucked != nil {
+                    untuckPip(p)
+                    return
+                }
+                let edges = resizeEdges(of: p, at: screenPoint)
+                if !edges.isEmpty, let f = p.drawnPip {
+                    cancelPipFlight(p)
+                    p.pip = f
+                    p.pipShown = nil
+                    pipResize = PipResize(proxy: p, edges: edges, start: f)
+                    setCursor(edges)
+                    return
+                }
+                beginPipDrag(p, at: screenPoint)
+                return
+            }
             let edges = resizeEdges(of: p, at: screenPoint)
             if !edges.isEmpty {
                 dragging = nil
@@ -2254,15 +2612,11 @@ final class CanvasView: NSView {
             // click usually lands while the first is on its way in, above).
             if event.clickCount >= 2, p.kind == .window {
                 dragging = nil
-                onHandoff?(p)
+                if scaledWindowsInUse, Settings.scaledClickZooms { onClickFocus?(p) } else { onHandoff?(p) }
                 return
             }
             // The press brings it to the front, with its group; a drag moves it.
-            raise(p)
-            dragging = Drag(proxy: p, grabOffset: CGPoint(x: worldPoint.x - p.worldRect.minX, y: worldPoint.y - p.worldRect.minY),
-                            start: screenPoint, startRect: p.worldRect,
-                            members: members(of: p, includingAway: true).map { Member(proxy: $0, from: $0.worldRect) })
-            Haptics.Player.shared.begin()
+            beginDrag(p, at: screenPoint)
         } else if event.clickCount == 2, onOpenHere != nil, !Settings.stripMode, !showsDesktop {
             // A double-click on the empty canvas: Open Here…, as from its right-click menu.
             onOpenHere?(worldPoint)
@@ -2292,6 +2646,15 @@ final class CanvasView: NSView {
             beginFileDrag(press, event: event)
             return
         }
+        if pipDrag != nil {
+            movePipDrag(to: screenPoint, timestamp: event.timestamp)
+            return
+        }
+        if let r = pipResize {
+            r.proxy.pip = PictureInPicture.resized(r.start, edges: r.edges, to: screenPoint, size: r.proxy.worldRect.size, visible: visibleForPip)
+            pipChanged(r.proxy)
+            return
+        }
         if var r = resizing {
             if !r.moved {
                 guard hypot(screenPoint.x - r.start.x, screenPoint.y - r.start.y) >= CanvasView.dragSlop else { return }
@@ -2307,57 +2670,8 @@ final class CanvasView: NSView {
             }
             onContentChanged?()
             onResize?(r.proxy, r.anchor, false)
-        } else if var d = dragging {
-            if !d.moved {
-                guard hypot(screenPoint.x - d.start.x, screenPoint.y - d.start.y) >= CanvasView.dragSlop else { return }
-                // A widget the setting places stays put: the drag pans the canvas, as on the ground.
-                if isPlacedBySetting?(d.proxy) == true {
-                    dragging = nil
-                    panning = true
-                    lastPointer = screenPoint
-                    return
-                }
-                d.moved = true
-                // ⌘ from the first move pulls a bonded window out of its group: it goes on alone.
-                if event.modifierFlags.contains(.command), !d.members.isEmpty {
-                    release(d.proxy)
-                    d.members = []
-                    Haptics.Player.shared.play(.split, key: ObjectIdentifier(d.proxy))
-                }
-                dragging = d
-            }
-            // The group as the magnet has it: a pulled window may have bonded since the last move.
-            if let m = magnet, m.proxy === d.proxy { d.members = m.members }
-            d.velocity.add(screenPoint, at: event.timestamp)
-            let w = camera.toWorld(screenPoint)
-            var origin = CGPoint(x: w.x - d.grabOffset.x, y: w.y - d.grabOffset.y)
-            d.snappedX = false
-            d.snappedY = false
-            var guides: [Snapping.Guide] = []
-            // ⌘ places the window freely: no guides now, no grid when it's let go.
-            if Settings.alignmentGuides, !Settings.stripMode, !event.modifierFlags.contains(.command) {
-                let a = Snapping.align(CGRect(origin: origin, size: d.proxy.worldRect.size), to: neighbours(of: d.proxy),
-                                       threshold: CanvasView.snapDistance / camera.zoom, gap: Settings.gridSize)
-                origin = a.origin
-                d.snappedX = a.snappedX
-                d.snappedY = a.snappedY
-                guides = a.guides
-            }
-            // A guide the window wasn't on a moment ago has just caught it: a detent under the finger.
-            // One per move, however many guides the catch lined it up with at once.
-            let keys = Set(guides.map(GuideKey.init))
-            if let caught = keys.subtracting(d.guideKeys).first {
-                Haptics.Player.shared.play(.detent, key: caught)
-            }
-            d.guideKeys = keys
-            dragging = d
-            place(d.proxy, at: origin, members: d.members)
-            if Settings.magnetism, !Settings.stripMode, !event.modifierFlags.contains(.command) {
-                push(from: d.proxy, startRect: d.startRect, members: d.members)
-                guides += pullGuides()
-            }
-            onContentChanged?()
-            show(guides)
+        } else if dragging != nil {
+            dragWindow(to: screenPoint, modifiers: event.modifierFlags, timestamp: event.timestamp)
         } else if panning {
             beginInput()
             pending.addPan(CGVector(dx: screenPoint.x - lastPointer.x, dy: screenPoint.y - lastPointer.y))
@@ -2399,6 +2713,21 @@ final class CanvasView: NSView {
             onFloorClick?(press.icon, press.modifiers, true)
             return
         }
+        if let r = pipResize {
+            pipResize = nil
+            setCursor([])
+            settlePip(r.proxy)
+            updateHover(at: topLeftPoint(event))
+            panning = false
+            return
+        }
+        if let d = pipDrag {
+            // Let go where it was pressed: a click, which returns the window to 1:1 where the tile is.
+            if !endPipDrag(timestamp: event.timestamp, freely: event.modifierFlags.contains(.command)) { onPipReturn?(d.proxy) }
+            updateHover(at: topLeftPoint(event))
+            panning = false
+            return
+        }
         if let r = resizing {
             resizing = nil
             if r.moved {
@@ -2421,31 +2750,17 @@ final class CanvasView: NSView {
             return
         }
         if let d = dragging, d.moved {
-            let freely = event.modifierFlags.contains(.command)
-            // A group coasts as one: its whole width bounds the coast.
-            let body = ([d.proxy] + d.members.map(\.proxy)).map(\.worldRect).reduce(CGRect.null) { $0.union($1) }
-            if var m = magnet, m.proxy === d.proxy, !freely,
-               let coast = Magnetism.Coast(from: d.proxy.worldRect.origin, screenVelocity: d.velocity.release(at: event.timestamp),
-                                           zoom: camera.zoom, width: body.width, at: CACurrentMediaTime()),
-               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                // Flung: it keeps going a little, shoving as it goes, and drops when it stops (`tickMagnet`).
-                m.coast = coast
-                m.freely = false
-                m.snappedX = d.snappedX
-                m.snappedY = d.snappedY
-                m.released = true
-                magnet = m
-                show([])
-                startDisplayLink()
-            } else {
-                drop(d, freely: freely)
-            }
+            finishDrag(d, modifiers: event.modifierFlags, timestamp: event.timestamp)
         } else if let d = dragging {
             switch d.proxy.kind {
             case .widget:
                 // One click uses a widget, as on the desktop, right away: there's no double-click to wait for.
                 let r = d.proxy.worldRect
                 onPress?(d.proxy, CGPoint(x: r.minX + d.grabOffset.x, y: r.minY + d.grabOffset.y))
+            case .window where scaledWindowsInUse && !Settings.scaledClickZooms:
+                // Using windows at any zoom, a click on the title strip focuses the window where it is,
+                // as a click in its content does; a double-click brings it to the middle (`mouseDown`).
+                onFocus?(d.proxy)
             case .window:
                 // Brought to the front on the press. Zoomed in or out, the click enters it at 1:1 right
                 // where it is, around the clicked spot; a double-click brings it to the middle instead.
@@ -2460,9 +2775,124 @@ final class CanvasView: NSView {
         }
     }
 
+    /// A press on a window or widget that may become a drag: it comes to the front with its group.
+    private func beginDrag(_ p: WindowProxy, at screenPoint: CGPoint) {
+        let worldPoint = camera.toWorld(screenPoint)
+        raise(p)
+        dragging = Drag(proxy: p, grabOffset: CGPoint(x: worldPoint.x - p.worldRect.minX, y: worldPoint.y - p.worldRect.minY),
+                        start: screenPoint, startRect: p.worldRect,
+                        members: members(of: p, includingAway: true).map { Member(proxy: $0, from: $0.worldRect) })
+        Haptics.Player.shared.begin()
+    }
+
+    /// The pointer moved with a window pressed: past the slop it moves, guided, snapped and shoving.
+    private func dragWindow(to screenPoint: CGPoint, modifiers: NSEvent.ModifierFlags, timestamp: TimeInterval) {
+        guard var d = dragging else { return }
+        if !d.moved {
+            guard hypot(screenPoint.x - d.start.x, screenPoint.y - d.start.y) >= CanvasView.dragSlop else { return }
+            // A widget the setting places stays put: the drag pans the canvas, as on the ground.
+            if isPlacedBySetting?(d.proxy) == true {
+                dragging = nil
+                panning = true
+                lastPointer = screenPoint
+                return
+            }
+            d.moved = true
+            // ⌘ from the first move pulls a bonded window out of its group: it goes on alone.
+            if modifiers.contains(.command), !d.members.isEmpty {
+                release(d.proxy)
+                d.members = []
+                Haptics.Player.shared.play(.split, key: ObjectIdentifier(d.proxy))
+            }
+            dragging = d
+        }
+        // The group as the magnet has it: a pulled window may have bonded since the last move.
+        if let m = magnet, m.proxy === d.proxy { d.members = m.members }
+        d.velocity.add(screenPoint, at: timestamp)
+        let w = camera.toWorld(screenPoint)
+        var origin = CGPoint(x: w.x - d.grabOffset.x, y: w.y - d.grabOffset.y)
+        d.snappedX = false
+        d.snappedY = false
+        var guides: [Snapping.Guide] = []
+        // ⌘ places the window freely: no guides now, no grid when it's let go.
+        if Settings.alignmentGuides, !Settings.stripMode, !modifiers.contains(.command) {
+            let a = Snapping.align(CGRect(origin: origin, size: d.proxy.worldRect.size), to: neighbours(of: d.proxy),
+                                   threshold: CanvasView.snapDistance / camera.zoom, gap: Settings.gridSize)
+            origin = a.origin
+            d.snappedX = a.snappedX
+            d.snappedY = a.snappedY
+            guides = a.guides
+        }
+        // A guide the window wasn't on a moment ago has just caught it: a detent under the finger.
+        // One per move, however many guides the catch lined it up with at once.
+        let keys = Set(guides.map(GuideKey.init))
+        if let caught = keys.subtracting(d.guideKeys).first {
+            Haptics.Player.shared.play(.detent, key: caught)
+        }
+        d.guideKeys = keys
+        dragging = d
+        place(d.proxy, at: origin, members: d.members)
+        if Settings.magnetism, !Settings.stripMode, !modifiers.contains(.command) {
+            push(from: d.proxy, startRect: d.startRect, members: d.members)
+            guides += pullGuides()
+        }
+        onContentChanged?()
+        show(guides)
+    }
+
+    /// A moved window let go: it coasts or drops.
+    private func finishDrag(_ d: Drag, modifiers: NSEvent.ModifierFlags, timestamp: TimeInterval) {
+        let freely = modifiers.contains(.command)
+        // A group coasts as one: its whole width bounds the coast.
+        let body = ([d.proxy] + d.members.map(\.proxy)).map(\.worldRect).reduce(CGRect.null) { $0.union($1) }
+        if var m = magnet, m.proxy === d.proxy, !freely,
+           let coast = Magnetism.Coast(from: d.proxy.worldRect.origin, screenVelocity: d.velocity.release(at: timestamp),
+                                       zoom: camera.zoom, width: body.width, at: CACurrentMediaTime()),
+           !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            // Flung: it keeps going a little, shoving as it goes, and drops when it stops (`tickMagnet`).
+            m.coast = coast
+            m.freely = false
+            m.snappedX = d.snappedX
+            m.snappedY = d.snappedY
+            m.released = true
+            magnet = m
+            show([])
+            startDisplayLink()
+        } else {
+            drop(d, freely: freely)
+        }
+    }
+
+    // MARK: Drags from outside the view
+
+    /// A drag the canvas never got the press for: using windows at any zoom, the press went through the
+    /// canvas to the app, and the press tap (`PressTap`) found it to be a move. It moves the window just
+    /// as a drag on the canvas does. `screenPoint` is in the view's top-left space.
+    func beginExternalDrag(_ p: WindowProxy, at screenPoint: CGPoint) {
+        guard dragging == nil, resizing == nil, !p.leaving, !p.closing else { return }
+        cancelAnimation()
+        settleMagnet(now: true)
+        floorPress = nil
+        clickEntering = nil
+        beginDrag(p, at: screenPoint)
+    }
+
+    func moveExternalDrag(to screenPoint: CGPoint, modifiers: NSEvent.ModifierFlags, timestamp: TimeInterval) {
+        guard dragging != nil else { return }
+        dragWindow(to: screenPoint, modifiers: modifiers, timestamp: timestamp)
+    }
+
+    func endExternalDrag(modifiers: NSEvent.ModifierFlags, timestamp: TimeInterval) {
+        guard let d = dragging else { return }
+        if d.moved { finishDrag(d, modifiers: modifiers, timestamp: timestamp) }
+        dragging = nil
+    }
+
+    var isExternalDragging: Bool { dragging != nil }
+
     override func scrollWheel(with event: NSEvent) {
         if CanvasView.isPassedOn(event) { return }
-        let inFront = window?.isKeyWindow == true
+        let inFront = cameraIsFree
         // A new scroll with the canvas in front is the canvas's to place: a trackpad's starts with `began`,
         // a mouse wheel's clicks have no phase at all.
         let starts = event.phase == .began || (event.phase == [] && event.momentumPhase == [] && !scrollingOn)
@@ -2473,17 +2903,28 @@ final class CanvasView: NSView {
             onUseScrollFollow?(event)
             return
         }
-        // macOS delivers scroll and pinch to inactive windows too; while a real window is in front,
-        // moving the camera would silently desync it from its proxy.
+        // macOS delivers scroll and pinch to inactive windows too; while an entered window is in front,
+        // moving the camera would silently desync it from its proxy. A window used where it's drawn is
+        // different: the canvas stays as it is, and a scroll beside it pans as ever.
         guard inFront else { return }
         // At 1:1 a scroll over a window is the window's, as on the desktop; ⌥ and ⌘ still zoom.
         let screenPoint = topLeftPoint(event)
         if starts, isOneToOne, !event.modifierFlags.contains(.option), !event.modifierFlags.contains(.command),
-           isCovered?(screenPoint) != true, let p = proxy(at: camera.toWorld(screenPoint)), p.kind == .window {
+           isCovered?(screenPoint) != true, let p = proxy(at: camera.toWorld(screenPoint)), p.kind == .window, p.pip == nil {
             scrollingOn = true
             onUseScroll?(p, screenPoint, event)
             return
         }
+        panOrZoom(event, at: screenPoint)
+    }
+
+    /// A two-finger scroll over a window the canvas has stepped aside for, taken by the press tap: the
+    /// canvas pans (⌥ or ⌘ held, zooms), whether or not the canvas is key, as over empty canvas.
+    func externalScroll(_ event: NSEvent, at screenPoint: CGPoint) {
+        panOrZoom(event, at: screenPoint)
+    }
+
+    private func panOrZoom(_ event: NSEvent, at screenPoint: CGPoint) {
         // The Mac's own momentum events come through here too, so a scroll pan coasts by itself; with
         // pan inertia off in Settings (or Reduce Motion on) they're dropped and the pan stops with the
         // fingers.
@@ -2494,6 +2935,12 @@ final class CanvasView: NSView {
         }
         if event.momentumPhase != [],
            !Settings.panInertia || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return }
+        // ⌥-scroll over a tile sizes the tile, not the canvas.
+        if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.command),
+           isCovered?(screenPoint) != true, let p = pipProxy(atScreen: screenPoint), p.pip != nil {
+            scalePip(of: p, by: exp(-event.scrollingDeltaY * 0.01), around: screenPoint, settled: event.phase == .ended || event.phase == [])
+            return
+        }
         beginInput()
         if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.command) {
             pending.addZoom(by: exp(-event.scrollingDeltaY * 0.01), around: screenPoint)
@@ -2502,24 +2949,76 @@ final class CanvasView: NSView {
         }
     }
 
+    /// A tile sized about the pointer (`PictureInPicture.scaled`, a pinch or ⌥-scroll over it); `settled`:
+    /// the gesture is over, the tile springs back into its corner.
+    private func scalePip(of p: WindowProxy, by factor: CGFloat, around screenPoint: CGPoint, settled: Bool) {
+        guard p.pipTucked == nil else { return }
+        cancelPipFlight(p)
+        if let shown = p.pipShown { p.pip = shown; p.pipShown = nil }
+        guard let f = p.pip else { return }
+        p.pip = PictureInPicture.scaled(f, by: factor, around: screenPoint, size: p.worldRect.size, visible: visibleForPip)
+        pipChanged(p)
+        if settled { settlePip(p) }
+    }
+
+    /// The tile a pinch began over, if any: the whole pinch sizes it.
+    private weak var pinchingPip: WindowProxy?
+
     override func magnify(with event: NSEvent) {
-        guard window?.isKeyWindow == true else { return }
-        beginInput()
-        let screenPoint = topLeftPoint(event)
+        guard cameraIsFree else {
+            if event.phase == .began { NSLog("Pinch: dropped, the canvas isn't key and no window is in use where it's drawn") }
+            return
+        }
+        let pinchPoint = topLeftPoint(event)
         if event.phase == .began {
+            pinchingPip = isCovered?(pinchPoint) != true ? pipProxy(atScreen: pinchPoint) : nil
+        }
+        if let p = pinchingPip {
+            let over = event.phase == .ended || event.phase == .cancelled
+            scalePip(of: p, by: max(0.01, 1 + event.magnification), around: pinchPoint, settled: over)
+            if over { pinchingPip = nil }
+            return
+        }
+        pinch(event, at: pinchPoint)
+    }
+
+    /// A pinch over a window the canvas has stepped aside for, taken by the press tap from the window
+    /// server's gesture stream: the canvas's zoom, whether or not the canvas is key (the window's app
+    /// may be in front).
+    func externalPinch(magnification: CGFloat, phase: NSEvent.Phase, timestamp: TimeInterval, at screenPoint: CGPoint) {
+        // Anchored where the pointer is now, read the way the canvas's own gestures read it, rather
+        // than where the tap's thread saw it.
+        let anchor = window != nil ? pointerTopLeft : screenPoint
+        pinch(magnification: magnification, phase: phase, timestamp: timestamp, at: anchor)
+    }
+
+    /// Sunlight's menu for a window the canvas has stepped aside for, on a right-click taken by the press
+    /// tap: the same menu a right-click on the window gives when the canvas is in front, popped up at
+    /// the click (top-left origin), whether or not the canvas is key.
+    func showTileMenu(for proxy: WindowProxy, atTopLeft point: CGPoint) {
+        tileMenu(for: proxy).popUp(positioning: nil, at: CGPoint(x: point.x, y: bounds.height - point.y), in: self)
+    }
+
+    private func pinch(_ event: NSEvent, at screenPoint: CGPoint) {
+        pinch(magnification: event.magnification, phase: event.phase, timestamp: event.timestamp, at: screenPoint)
+    }
+
+    private func pinch(magnification: CGFloat, phase: NSEvent.Phase, timestamp: TimeInterval, at screenPoint: CGPoint) {
+        beginInput()
+        if phase == .began {
             pinchLog = 0
             pinchVelocity = Motion.ScalarVelocity()
         }
-        pinchHeld = !(event.phase == .ended || event.phase == .cancelled)
-        let factor = max(0.01, 1 + event.magnification)
+        pinchHeld = !(phase == .ended || phase == .cancelled)
+        let factor = max(0.01, 1 + magnification)
         pinchLog += log(factor)
-        pinchVelocity.add(pinchLog, at: event.timestamp)
+        pinchVelocity.add(pinchLog, at: timestamp)
         pending.addZoom(by: factor, around: screenPoint)
-        guard event.phase == .ended || event.phase == .cancelled else { return }
+        guard phase == .ended || phase == .cancelled else { return }
         // The gesture is over: the camera as it left it, now, decides what follows.
         flushInput()
         updateHover(at: screenPoint)
-        let v = pinchVelocity.release(at: event.timestamp)
+        let v = pinchVelocity.release(at: timestamp)
         pinchLog = 0
         pinchVelocity = Motion.ScalarVelocity()
         // Ended nearly on a full screen window: onto it and in, centred, rather than in place.
@@ -2536,8 +3035,8 @@ final class CanvasView: NSView {
         // Not a handoff: the pinch tails off for a moment, never up across the handoff zoom, which
         // the fingers didn't reach. Nothing with zoom inertia off in Settings, or under Reduce Motion.
         guard Settings.zoomInertia, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-              let tail = Motion.ZoomCoast(velocity: v, anchor: screenPoint, at: event.timestamp),
-              camera.zoom >= CanvasView.handoffZoom || tail.end(from: camera.zoom, at: event.timestamp) < CanvasView.handoffZoom
+              let tail = Motion.ZoomCoast(velocity: v, anchor: screenPoint, at: timestamp),
+              camera.zoom >= CanvasView.handoffZoom || tail.end(from: camera.zoom, at: timestamp) < CanvasView.handoffZoom
         else { return }
         zoomCoast = tail
         startDisplayLink()

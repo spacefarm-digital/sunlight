@@ -41,8 +41,19 @@ final class HandoffTests: XCTestCase {
     func testAClickKeepsTheClickedSpotUnderThePointer() {
         let p = plan(.clicked(at: CGPoint(x: 1000, y: 700), offset: CGPoint(x: 100, y: 50)))
         XCTAssertEqual(p.origin, CGPoint(x: 900, y: 650))
+        XCTAssertEqual(p.inPlaceOrigin, p.origin)
         XCTAssertTrue(p.clicked)
         XCTAssertNotNil(p.inPlace)
+    }
+
+    func testAClickNearTheTopLandsTheWindowUnderTheMenuBarAndRemembersWhereItWasAsked() {
+        // The clicked spot is 50 pt into the window, 20 pt from the top of the screen: the window's top
+        // would be above the menu bar, so it lands right under it, and the plan keeps where it was asked.
+        let p = plan(.clicked(at: CGPoint(x: 1000, y: 20), offset: CGPoint(x: 100, y: 50)))
+        XCTAssertEqual(p.origin, CGPoint(x: 900, y: 38))
+        XCTAssertEqual(p.inPlaceOrigin, CGPoint(x: 900, y: -30))
+        XCTAssertEqual(p.inPlace, Camera(origin: CGPoint(x: 2100, y: 2030), zoom: 1))
+        XCTAssertEqual(p.camera, Camera(origin: CGPoint(x: 2100, y: 1962), zoom: 1))
     }
 
     func testATiledWindowLinesUpWithItsArea() {
@@ -104,6 +115,17 @@ final class HandoffTests: XCTestCase {
         let camera = Handoff.cameraAligning(window, with: CGRect(x: 600, y: 319, width: 800, height: 600))
         XCTAssertEqual(camera.toScreen(window.origin), CGPoint(x: 600, y: 319))
         XCTAssertEqual(camera.zoom, 1)
+    }
+
+    func testTheFixingCameraKeepsThePointUnderThePointerAtOneToOne() {
+        let camera = Camera(origin: CGPoint(x: 2500, y: 1500), zoom: 0.5)
+        let point = CGPoint(x: 700, y: 400)
+        let fixing = Handoff.cameraFixing(point, at: camera)
+        XCTAssertEqual(fixing.zoom, 1)
+        XCTAssertEqual(fixing.toWorld(point), camera.toWorld(point))
+        // The window drawn at (250, 250) 400×300 at the half zoom: the pointer is 450 pt in, 150 pt down
+        // on it; at 1:1 its real frame starts 900 pt left and 300 pt up of the pointer.
+        XCTAssertEqual(fixing.toScreen(window.origin), CGPoint(x: -200, y: 100))
     }
 
     func testACameraSeenFromGlobalAndBack() {

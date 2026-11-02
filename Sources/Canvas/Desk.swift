@@ -65,7 +65,7 @@ final class Desk {
         }
     }
 
-    /// The displays that get a canvas: every one with Settings › General › Experimental › Multiple
+    /// The displays that get a canvas: every one with Settings › Experimental › Multiple
     /// displays on, else only the main one, whose canvas then shows the others' windows where they are.
     private static var displays: [Display] {
         let all = Display.all
@@ -75,6 +75,7 @@ final class Desk {
     private func add(_ display: Display, lead: Bool) {
         let c = CanvasController(display: display, desk: self, lead: lead)
         c.onSetUp = onSetUp
+        c.onHowToUse = onHowToUse
         c.takeover = takeover
         c.permissionsAskedElsewhere = permissionsAskedElsewhere
         c.isSetupShowing = isSetupShowing
@@ -89,6 +90,8 @@ final class Desk {
     // MARK: What the app sets
 
     var onSetUp: (() -> Void)? { didSet { canvases.forEach { $0.onSetUp = onSetUp } } }
+    /// ⌘? anywhere while taken over: Settings › How to use.
+    var onHowToUse: (() -> Void)? { didSet { canvases.forEach { $0.onHowToUse = onHowToUse } } }
     /// A display came or went (after `reviewDisplays`).
     var onDisplaysChanged: (() -> Void)?
     /// Customise… on any canvas's background menu.
@@ -210,7 +213,7 @@ final class Desk {
             (panning ?? current).trackpadPan(phase)
             panning = nil
         case .seeAll:
-            // By Settings › Trackpad, a flick up can end a drag mid-way: that canvas gets it.
+            // By Settings › How to use, a flick up can end a drag mid-way: that canvas gets it.
             (panning ?? current).trackpadPan(phase)
             panning = nil
         case .spread:
@@ -223,6 +226,7 @@ final class Desk {
     func tidy() { current.tidy() }
     func tidy(by order: Tidy.Order) { current.tidy(by: order) }
     func toggleStripMode() { current.toggleStripMode() }
+    func togglePip() { current.togglePipCommand() }
     func toggleMinimap() { current.toggleMinimap() }
     func toggleDesktopFloor() { current.toggleDesktopFloor() }
     func showDesktop() { current.showDesktop() }
@@ -302,14 +306,50 @@ final class Desk {
     // MARK: Takeover
 
     func handle(_ command: KeyTap.Command) {
-        // Pressed again on the canvas, the Mission Control key goes back into the last window, on whichever display.
-        if case .missionControl = command, NSApp.isActive, !canvases.contains(where: \.isSwitching) {
+        let switching = canvases.first(where: \.isSwitching)
+        switch command {
+        case .missionControl where switching == nil:
             NSLog("Key: \(command)")
-            toggle()
+            missionControlHold?.cancel()
+            if NSApp.isActive {
+                // Pressed again on the canvas, a tap goes back into the last window, on whichever display; it
+                // waits for the release to know it's a tap. Held, the canvas fits everything to pick from.
+                let hold = DispatchWorkItem { [weak self] in
+                    guard let self, case .onCanvas = self.missionControlPress else { return }
+                    self.pointed.seeAllHeld()
+                }
+                missionControlPress = .onCanvas
+                missionControlHold = hold
+                DispatchQueue.main.asyncAfter(deadline: .now() + MissionControlHold.threshold, execute: hold)
+            } else {
+                missionControlPress = .fromWindow
+                current.handle(command)
+            }
             return
+        case .missionControlUp(let held):
+            missionControlHold?.cancel()
+            missionControlHold = nil
+            guard let press = missionControlPress else { return }
+            missionControlPress = nil
+            NSLog("Key: Mission Control key let go after \(String(format: "%.2f", held)) s")
+            guard switching == nil else { return }
+            switch MissionControlHold.release(held: held, press: press) {
+            case .toggle: toggle()
+            case .stay: break
+            case .pick: pointed.enterUnderPointer()
+            }
+            return
+        case .missionControlUp:
+            return
+        default:
+            (switching ?? current).handle(command)
         }
-        (canvases.first(where: \.isSwitching) ?? current).handle(command)
     }
+
+    /// The Mission Control key, between going down and being let go (`MissionControlHold`).
+    private var missionControlPress: MissionControlHold.Press?
+    /// Pressed on the canvas: fits everything once the key has been held a moment.
+    private var missionControlHold: DispatchWorkItem?
 
     /// An app came forward by itself: to the canvas waiting on it, or in one of its windows, else the
     /// current one; that canvas hands it to the one its window is on (`absorbForeign`).

@@ -20,7 +20,7 @@ final class SetupDiagnoseTests: XCTestCase {
     func testTheReportHasEverySection() {
         let report = SetupDiagnose.report(facts())
         for heading in ["Sunlight diagnose report", "Sunlight 0.1 (1), in ~/Applications/Sunlight.app", "macOS 27.2 (Build 27C101), Apple silicon, an administrator",
-                        "== Setup ==", "Setup: 4 steps left, starting with background helper.", "Progress: 2 of 6 steps",
+                        "== Setup ==", "Setup: 4 steps left, starting with background helper.", "Progress: 2 of 6 steps", "Stage Manager: off",
                         "Wizard: welcomed, open at login chosen, live windows started, opens at launch", "Preview mode: on",
                         "== Renderer ==", "Sunlight live-window protocol v1: unavailable", "Effective renderer: capture",
                         "== Live-windows helper ==", "Add-on: not installed",
@@ -78,5 +78,16 @@ final class SetupDiagnoseTests: XCTestCase {
         XCTAssertTrue(summary.contains("SIP consent given "))
         XCTAssertTrue(summary.contains("resuming at recovery"))
         XCTAssertTrue(summary.hasSuffix("doesn't open at launch"))
+    }
+}
+
+final class DiagnoseDesktopsTests: XCTestCase {
+    func testDesktopCount() {
+        let one = Spaces.Display(identifier: "A", spaces: [Spaces.Space(id: 1, kind: .user)], current: 1)
+        let two = Spaces.Display(identifier: "B", spaces: [Spaces.Space(id: 2, kind: .user), Spaces.Space(id: 3, kind: .user), Spaces.Space(id: 4, kind: .fullScreen)], current: 2)
+        XCTAssertEqual(SetupDiagnose.desktopsLine([one]), "1 on 1 display")
+        XCTAssertEqual(SetupDiagnose.desktopsLine([one, one]), "1 on each of 2 displays")
+        XCTAssertEqual(SetupDiagnose.desktopsLine([one, two]), "3 (1 + 2 on 2 displays), 1 full-screen app Space")
+        XCTAssertEqual(SetupDiagnose.desktopsLine([]), "unknown (SkyLight didn't say)")
     }
 }

@@ -4,7 +4,7 @@ import ApplicationServices
 /// What a Mac still needs before Sunlight works as intended. Two permissions, Accessibility and Screen
 /// Recording, make a usable preview (windows as pictures; see `Settings.previewMode`). Live windows, the
 /// real thing, take the helper's OK, System Integrity Protection partly off, a boot argument and the
-/// add-on in the Dock. The setup window walks through it, Settings › General summarises it, and
+/// add-on in the Dock. The setup window walks through it, Settings › Live Windows draws it, and
 /// `--renderer-status` prints it.
 struct SetupStatus: Equatable, Sendable {
     enum Helper: Equatable, Sendable {

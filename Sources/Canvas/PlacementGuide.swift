@@ -1,10 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Instructions › Placing Windows (`Manual`): the three placement scopes shown rather than described.
-/// Each card is a miniature canvas whose windows act the command out on a loop, with the keys under it
-/// and a Try button that runs the real command on the canvas behind the window. Also reached from the
-/// ? in Settings › Windows.
+/// Settings › How to use › Placing (`Manual`): the three placement scopes shown rather than described.
+/// Each is a miniature canvas whose windows act the command out on a loop, with the keys beside it and
+/// a Try button that runs the real command on the canvas behind the window. Also reached from the ? in
+/// Settings › Windows.
 enum PlacementGuide {
     enum Scope: CaseIterable, Identifiable {
         case window, screen, everything
@@ -29,9 +29,9 @@ enum PlacementGuide {
 
         var line: String {
             switch self {
-            case .window: return "The window under the pointer takes a slot of its screen: a half, a quarter, a third."
-            case .screen: return "The windows on the screen you're looking at share it in columns."
-            case .everything: return "Every window on the canvas, on one grid, from the screen you're looking at."
+            case .window: return "The window under the pointer takes a half, quarter or third."
+            case .screen: return "This screen’s windows share it in columns."
+            case .everything: return "Every window on the canvas, on one grid."
             }
         }
 
@@ -57,13 +57,13 @@ enum PlacementGuide {
 
     static let byHand: [HandItem] = [
         HandItem(id: "drag", symbol: "hand.point.up.left", title: "Drag",
-                 line: "Edges and centres stick to the neighbours'; let go and it settles onto the grid."),
+                 line: "Edges line up with the neighbours."),
         HandItem(id: "free", symbol: "command", title: "⌘-drag",
-                 line: "Freely: no guides, no grid, over other windows."),
+                 line: "Freely, with no guides or grid."),
         HandItem(id: "edge", symbol: "arrow.up.left.and.arrow.down.right", title: "An edge or corner",
-                 line: "Resizes, the real window following as you drag."),
+                 line: "Resizes the window."),
         HandItem(id: "push", symbol: "arrow.left.and.right", title: "Into a neighbour",
-                 line: "It moves aside, when windows push each other in Settings."),
+                 line: "It moves aside, if windows push each other."),
     ]
 
     // MARK: The demos
@@ -116,128 +116,52 @@ enum PlacementGuide {
 
 // MARK: - Views
 
-struct PlacementGuideView: View {
+/// Settings › How to use › Placing: one section per scope, its miniature acting the command out beside
+/// what it does, its keys and a Try button, then what the hand does.
+struct PlacingChapter: View {
     let onTry: (PlacementGuide.Scope) -> Void
-    let onSettings: () -> Void
-    /// A Done button, for the guide in a window of its own; nil inside the instructions.
-    let onDone: (() -> Void)?
     /// `Settings.arranging`: Arrange and Tidy are shown only with it on.
     let arranging: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Placing windows")
-                .font(.system(size: 12, weight: .semibold))
-                .tracking(1.4)
-                .textCase(.uppercase)
-                .foregroundStyle(.primary.opacity(0.55))
-                .padding(.bottom, 10)
-            Text(arranging ? "Three ways to place windows." : "Place a window with a key.")
-                .font(.system(size: 30, weight: .semibold))
-                .tracking(-0.6)
-                .accessibilityAddTraits(.isHeader)
-            Text(arranging
-                 ? "Each one works on more than the last: one window, the windows on one screen, everything on the canvas. The keys are all ⌃⌥, and ⌘Z undoes any of them."
-                 : "The keys are all ⌃⌥, and ⌘Z undoes them.")
-                .font(.system(size: 14))
-                .foregroundStyle(.primary.opacity(0.7))
-                .lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 8)
-                .padding(.bottom, 24)
-            HStack(alignment: .top, spacing: 14) {
-                ForEach(PlacementGuide.scopes(arranging: arranging)) { scope in
-                    ScopeCard(scope: scope) { onTry(scope) }
-                }
-            }
-            Text("By hand")
-                .font(.system(size: 12, weight: .semibold))
-                .tracking(1.4)
-                .textCase(.uppercase)
-                .foregroundStyle(.primary.opacity(0.55))
-                .padding(.top, 28)
-                .padding(.bottom, 12)
-            HStack(alignment: .top, spacing: 14) {
-                ForEach(PlacementGuide.byHand) { item in
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: item.symbol)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.primary.opacity(0.6))
-                            .frame(width: 18)
-                            .padding(.top, 1)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.title).font(.system(size: 13, weight: .semibold))
-                            Text(item.line).font(.system(size: 12)).foregroundStyle(.primary.opacity(0.6))
+        Form {
+            ForEach(PlacementGuide.scopes(arranging: arranging)) { scope in
+                Section {
+                    HStack(alignment: .top, spacing: 16) {
+                        DemoView(demo: PlacementGuide.demo(for: scope))
+                            .frame(width: PlacementGuide.box.width, height: PlacementGuide.box.height)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(scope.line)
+                                .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
+                            Text(scope.keys)
+                                .font(.callout.weight(.medium))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                            Button("Try") { onTry(scope) }
+                                .controlSize(.small)
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+                } header: {
+                    SectionHeader(title: "\(scope.title) · \(scope.eyebrow.lowercased())")
                 }
             }
-            HStack(spacing: 14) {
-                Text("⌘Z undoes any placement.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary.opacity(0.5))
-                Spacer()
-                Button("Settings › Windows…", action: onSettings)
-                    .quietButton(size: 14, dim: 0.6)
-                if let onDone {
-                    Button("Done", action: onDone)
-                        .primaryButton(scale: 0.78)
-                        .keyboardShortcut(.defaultAction)
+            Section {
+                ForEach(PlacementGuide.byHand) { item in
+                    Label {
+                        RowLabel(title: item.title, subtitle: item.line)
+                    } icon: {
+                        Image(systemName: item.symbol).foregroundStyle(.secondary)
+                    }
                 }
+            } header: {
+                SectionHeader(title: "By hand", detail: "⌘Z undoes any placement.")
             }
-            .padding(.top, 28)
         }
-        .padding(EdgeInsets(top: 34, leading: 36, bottom: 30, trailing: 36))
-        .frame(minWidth: 860, maxWidth: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
-}
-
-struct ScopeCard: View {
-    let scope: PlacementGuide.Scope
-    let onTry: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            DemoView(demo: PlacementGuide.demo(for: scope))
-                .frame(width: PlacementGuide.box.width, height: PlacementGuide.box.height)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(.bottom, 14)
-            Text(scope.eyebrow)
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(1.2)
-                .textCase(.uppercase)
-                .foregroundStyle(.primary.opacity(0.5))
-            Text(scope.title)
-                .font(.system(size: 17, weight: .semibold))
-                .padding(.top, 3)
-            Text(scope.line)
-                .font(.system(size: 12.5))
-                .foregroundStyle(.primary.opacity(0.65))
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 5)
-            HStack(alignment: .firstTextBaseline) {
-                Text(scope.keys)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.primary.opacity(0.55))
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
-                Button("Try", action: onTry)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            }
-            .padding(.top, 12)
-        }
-        .padding(14)
-        .frame(width: PlacementGuide.box.width + 28)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.primary.opacity(0.05))
-                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.primary.opacity(0.08), lineWidth: 1))
-        )
+        .formStyle(.grouped)
     }
 }
 

@@ -38,7 +38,7 @@ enum CanvasApp {
             exit(0)
         }
         if args.contains("--help") || args.contains("-h") {
-            print("Sunlight [--release | --status | --renderer-status | --diagnose | --setup-preview <scenario> | --preview-mode | --welcome-music <file.wav>]\n  --release  restore the Dock, Finder and login item changed by takeover mode, then exit\n  --status   print takeover state and the current values\n  --renderer-status  check the live-window protocol without opening the canvas\n  --diagnose  print the Diagnose report: this Mac's setup, the renderer, the helper, the setup log\n  --setup-preview  show the Set Up Sunlight wizard for a made-up Mac (list: the scenarios)\n  --preview-mode  open the canvas in preview mode for this launch, even on a Mac set up for live windows\n  --welcome-music  write the wizard's welcome music to a WAV file")
+            print("Sunlight [--release | --status | --renderer-status | --diagnose | --setup-preview <scenario> | --preview-mode | --welcome-music <file.wav>]\n  --release  restore the Dock, Finder, Stage Manager and login item changed by Sunlight, then exit\n  --status   print takeover state and the current values\n  --renderer-status  check the live-window protocol without opening the canvas\n  --diagnose  print the Diagnose report: this Mac's setup, the renderer, the helper, the setup log\n  --setup-preview  show the Set Up Sunlight wizard for a made-up Mac (list: the scenarios)\n  --preview-mode  open the canvas in preview mode for this launch, even on a Mac set up for live windows\n  --welcome-music  write the wizard's welcome music to a WAV file")
             exit(0)
         }
         var reviewScenario: SetupReview.Scenario?
@@ -68,8 +68,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var canvas: Desk?
     /// The ⌃⌥ placement keys (`TileMenu`): global, so they work in a real window too.
     private var tileHotkeys: [Hotkey] = []
-    /// Sunlight Instructions: the basics, gestures, placing windows and keys, in one window.
-    private var instructions: ManualController?
     private var trackpadPan: TrackpadPan?
     private var takeover: TakeoverMode?
     private var signalSources: [DispatchSourceSignal] = []
@@ -86,6 +84,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var updater: Updater?
     /// The menu bar icon: with no Dock icon, every command lives there, in its panel or its right-click menu.
     private var menuBar: MenuBarItem?
+    /// Tell Sunlight's bar (⌃⌥Space), made the first time it's asked for.
+    private var agentBar: AgentBar?
     private let layoutsMenu = NSMenu(title: "Layouts")
     /// Rebuilt when an experimental feature is turned on or off (`rebuildWindowMenu`).
     private let windowMenu = NSMenu(title: "Window")
@@ -103,11 +103,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         updater = Updater()
         updater?.onFoundUpdate = { [weak self] version in self?.menuBar?.model.updateVersion = version }
         installMenu()
+        // A login item can be up before AppKit lists a display (the lid closed on a Mac whose external
+        // display is still waking, a display coming back from sleep): the canvas has nothing to be on, and
+        // starting it anyway crashed at launch. It waits for the first display instead.
+        if Display.all.isEmpty {
+            waitForDisplay()
+            return
+        }
+        startCanvas()
+    }
 
+    private var displayWait: NSObjectProtocol?
+    private var displayPoll: Timer?
+
+    private func waitForDisplay() {
+        NSLog("Startup: no display listed yet; waiting for one before opening the canvas")
+        displayWait = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                                             object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.displayMayHaveCome() }
+        }
+        // And a look every second, in case the notification never comes.
+        displayPoll = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.displayMayHaveCome() }
+        }
+    }
+
+    private func displayMayHaveCome() {
+        guard canvas == nil, !Display.all.isEmpty else { return }
+        if let displayWait { NotificationCenter.default.removeObserver(displayWait) }
+        displayWait = nil
+        displayPoll?.invalidate()
+        displayPoll = nil
+        NSLog("Startup: a display is listed now; opening the canvas")
+        startCanvas()
+    }
+
+    /// The canvas and everything around it, once there is a display to put it on.
+    private func startCanvas() {
         let canvas = Desk()
         self.canvas = canvas
         canvas.onSetUp = { [weak self] in self?.setupController().show(startingLive: true) }
         canvas.onCustomiseBackground = { [weak self] in self?.showSettings(tab: .background) }
+        canvas.onHowToUse = { [weak self] in self?.showInstructions(chapter: nil) }
         // A display more or fewer: ⌃⌥⇧ → ← are Sunlight's only while there's somewhere to move to.
         canvas.onDisplaysChanged = { [weak self] in self?.experimentalFeaturesChanged() }
         menuBar = makeMenuBar(for: canvas)
@@ -121,6 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             canvas?.trackpadPan(phase)
         }
         pan.start()
+        pan.setActive(Settings.sunlightOn)
         trackpadPan = pan
 
         if Settings.sunlightOn {
@@ -149,6 +187,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // An earlier Canvas restores the Mac as it quits; takeover starts once it has, so the two
         // never write the prefs over each other. The canvas is up meanwhile.
         TakeoverMode.quitOtherInstances { [weak self] in
+            // After the earlier copy has quit, which turns Stage Manager back on as it goes. Not before
+            // the open-at-login page of setup, which says so first.
+            if SetupRecord.loginItemChosen { StageManager.turnOff(why: "launch") }
             self?.takeover?.startup()
             if !Settings.sunlightOn { self?.takeover?.suspendInput() }
         }
@@ -179,6 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         canvas?.shutdown()
         canvas?.remember()
         takeover?.revertForTermination(quit: NSAppleEventManager.shared().currentAppleEvent)
+        StageManager.restore()
         return .terminateNow
     }
 
@@ -213,7 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
         // ⌃⌥ 2, 3, 4: the windows of the screen in view in columns. ⌃⌥A: everything, tidied. From a real
-        // window the canvas comes forward first. Only with arranging on (Settings › General › Experimental):
+        // window the canvas comes forward first. Only with arranging on (Settings › Experimental):
         // off, the keys stay free for other apps.
         if Settings.arranging {
             tileHotkeys += TileMenu.arrangements.compactMap { a in
@@ -232,12 +274,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if canvas.canvases.count > 1 {
             tileHotkeys += displayHotkeys(for: canvas)
         }
+        // ⌃⌥P: the window under the pointer (or the one used last) into Picture in Picture, or out of it;
+        // from a real window, that window.
+        tileHotkeys.append(Hotkey(keyCode: UInt32(TileMenu.pipKeyCode), modifiers: TileMenu.carbonModifiers) { [weak canvas] in
+            canvas?.togglePip()
+        })
+        // ⌃⌥Space: Tell Sunlight's bar, from the canvas or a window. Only with its flag on.
+        if Settings.tellSunlight {
+            tileHotkeys.append(Hotkey(keyCode: UInt32(kVK_Space), modifiers: TileMenu.carbonModifiers) { [weak self] in
+                self?.toggleAgentBar()
+            })
+        }
         // ⌃⌥S: strip mode on or off, from a real window too. Only with strip mode's flag on.
         if Settings.stripModeEnabled {
             tileHotkeys.append(Hotkey(keyCode: UInt32(TileMenu.stripKeyCode), modifiers: TileMenu.carbonModifiers) { [weak canvas] in
                 canvas?.toggleStripMode()
             })
         }
+    }
+
+    private func toggleAgentBar() {
+        guard Settings.tellSunlight, let canvas else { return }
+        if agentBar == nil {
+            let bar = AgentBar(desk: canvas, onLayoutsChanged: { [weak self] in self?.rebuildLayoutsMenu() })
+            bar.onOpenSettings = { [weak self] in self?.showSettings(tab: .general) }
+            agentBar = bar
+        }
+        agentBar?.toggle()
     }
 
     private func displayHotkeys(for canvas: Desk) -> [Hotkey] {
@@ -255,6 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func setSunlightOn(_ on: Bool) {
         guard on != Settings.sunlightOn || canvas?.paused == on else { return }
         Settings.sunlightOn = on
+        trackpadPan?.setActive(on)
         if on {
             if let canvas, tileHotkeys.isEmpty { installHotkeys(for: canvas) }
             takeover?.resumeInput()
@@ -332,7 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item.target = self
             menu.addItem(item)
         }
-        add("Instructions…", #selector(showInstructions(_:)), "?")
+        add("How to Use…", #selector(showInstructions(_:)), "?")
         add("Settings…", #selector(showSettings(_:)), ",")
         add("Set Up Sunlight…", #selector(showSetup))
         add("Check for Updates…", #selector(checkForUpdates))
@@ -391,15 +455,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         windowItem.submenu = windowMenu
         rebuildWindowMenu()
 
-        // Help: the instructions. macOS puts its search field here too.
-        let helpItem = NSMenuItem()
-        main.addItem(helpItem)
-        let helpMenu = NSMenu(title: "Help")
-        helpMenu.addItem(withTitle: "Sunlight Instructions", action: #selector(showInstructions(_:)), keyEquivalent: "?")
-        helpItem.submenu = helpMenu
-        NSApp.helpMenu = helpMenu
+        // No Help menu: macOS keeps ⌘? for a Help menu's search field, and with the menu bar never drawn
+        // that ate the key. ⌘? is How to Use: the key tap takes it from anywhere while Sunlight has the
+        // Mac (`KeyTap.Command.howToUse`); without the takeover, this catches it in any Sunlight window.
         NSApp.mainMenu = main
+        if howToUseKey == nil {
+            howToUseKey = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command, .shift],
+                      event.charactersIgnoringModifiers == "?", let self, self.setup?.isShowing != true
+                else { return event }
+                self.showInstructions(chapter: nil)
+                return nil
+            }
+        }
     }
+
+    /// ⌘? in any Sunlight window: Settings › How to use (`installMenu`).
+    private var howToUseKey: Any?
 
     /// What was the app menu, minus Quit. Fresh items on every call: the main menu and the menu bar icon
     /// each need their own.
@@ -411,6 +483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         return [
             item("Settings…", #selector(showSettings(_:)), ","),
+            item("How to Use Sunlight", #selector(showInstructions(_:)), "?"),
             item("Set Up Sunlight…", #selector(showSetup)),
             item("Check for Updates…", #selector(checkForUpdates)),
             item("Change Background…", #selector(showBackgroundSettings)),
@@ -441,9 +514,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
     }
 
-    /// Settings › General › Experimental: arranging or strip mode turned on or off. The Window menu,
+    /// Settings › Experimental: arranging or strip mode turned on or off. The Window menu,
     /// the hotkeys and the menu bar panel follow; the canvas's right-click menus are built as they open.
     private func experimentalFeaturesChanged() {
+        if !Settings.tellSunlight { agentBar?.shutDown() }
         rebuildWindowMenu()
         if Settings.sunlightOn, let canvas {
             tileHotkeys = []
@@ -471,7 +545,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let previous = NSMenuItem(title: "Move to Previous Display", action: #selector(moveToPreviousDisplay), keyEquivalent: arrow(NSLeftArrowFunctionKey))
         previous.keyEquivalentModifierMask = TileMenu.displayModifiers
         previous.target = self
-        return (Settings.stripModeEnabled ? [strip, showDesktop] : [showDesktop]) + [.separator(), next, previous]
+        // The window under the pointer (or the one used last, or the one you're in) into Picture in Picture.
+        let pip = NSMenuItem(title: "Picture in Picture", action: #selector(togglePip), keyEquivalent: TileMenu.pipKey)
+        pip.keyEquivalentModifierMask = TileMenu.modifiers
+        pip.target = self
+        return (Settings.stripModeEnabled ? [strip, showDesktop] : [showDesktop]) + [.separator(), pip, .separator(), next, previous]
     }
 
     private var placementActions: TileMenu.Actions {
@@ -543,28 +621,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         canvas?.tidy(by: order)
     }
 
-    /// Help › Sunlight Instructions (⌘?) and More › Instructions… in the menu bar icon.
+    /// ⌘?, Sunlight › How to Use Sunlight and More › How to Use… in the menu bar icon: Settings › How to use.
     @objc private func showInstructions(_ sender: Any?) {
         showInstructions(chapter: nil)
     }
 
-    /// The instructions, on a chapter or where they were left. The ? in Settings › Windows opens them on
-    /// Placing Windows.
+    /// Settings › How to use, on a chapter or where it was left. The ? in Settings › Windows opens it on
+    /// Placing.
     private func showInstructions(chapter: Manual.Chapter?) {
-        if instructions == nil {
-            instructions = ManualController(onTry: { [weak self] scope in
-                guard let canvas = self?.canvas else { return }
-                switch scope {
-                case .window: canvas.tile(.leftHalf)
-                case .screen: canvas.arrange(columns: 3, rows: 1)
-                case .everything: canvas.tidy()
-                }
-            }, onSettings: { [weak self] in self?.showSettings(tab: .windows) }, onTutorial: { [weak self] in
-                self?.instructions?.close()
-                self?.setupController().showBasics()
-            })
-        }
-        instructions?.show(chapter)
+        settingsController()?.showHowToUse(chapter)
     }
 
     @objc private func saveLayout() {
@@ -603,7 +668,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             settings = SettingsWindowController(background: canvas.background, onRendererChange: { [weak self] renderer in
                 self?.canvas?.configureRenderer(renderer)
             }, onSetup: { [weak self] in self?.showSetup() })
-            settings?.onPlacingGuide = { [weak self] in self?.showInstructions(chapter: .placing) }
+            settings?.onTryPlacing = { [weak self] scope in
+                guard let canvas = self?.canvas else { return }
+                switch scope {
+                case .window: canvas.tile(.leftHalf)
+                case .screen: canvas.arrange(columns: 3, rows: 1)
+                case .everything: canvas.tidy()
+                }
+            }
+            settings?.onTutorial = { [weak self] in
+                self?.settings?.close()
+                self?.setupController().showBasics()
+            }
             settings?.onReloadLiveWindows = { [weak self] in self?.reloadLiveWindows() }
             settings?.canReloadLiveWindows = { [weak self] in self?.canvas?.canReloadLiveWindows == true }
             settings?.isTakenOver = { [weak self] in self?.takeover?.isRunning == true }
@@ -662,7 +738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let controller = UninstallController()
         controller.onLeaveLiveWindows = { [weak self] in
             // Capture from here on, and remembered as such: a relaunch mid-uninstall must not load the
-            // add-on back into the Dock. Settings › Rendering brings live windows back if Sunlight stays.
+            // add-on back into the Dock. Settings › Live Windows brings live windows back if Sunlight stays.
             Settings.renderer = .capture
             self?.canvas?.configureRenderer(.capture)
         }
@@ -673,6 +749,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 TakeoverMode.revertPrefs()
                 UserDefaults.standard.set(false, forKey: TakeoverMode.Keys.enabled)
             }
+            StageManager.restore()
         }
         controller.onTrash = { [weak self] removingData in self?.uninstallAndQuit(removingData: removingData) }
         uninstall = controller
@@ -686,6 +763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         UninstallRecord.resuming = false
         canvas?.shutdown()
         if takeover?.isRunning == true { takeover?.revert(reason: .leaveMode) } else { TakeoverMode.revertPrefs() }
+        StageManager.restore()
         if removingData { UninstallFlow.removeUserData() }
         let bundle = Bundle.main.bundleURL
         guard bundle.pathExtension == "app" else { exit(0) }
@@ -727,6 +805,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func toggleStripMode() {
         canvas?.toggleStripMode()
+    }
+
+    /// Window › Picture in Picture (⌃⌥P): the window into Picture in Picture, or out of it (`PictureInPicture`).
+    @objc private func togglePip() {
+        canvas?.togglePip()
     }
 
     /// Flies to Finder's desktop and dims the windows; again, back.
