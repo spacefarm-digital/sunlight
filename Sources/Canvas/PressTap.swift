@@ -21,7 +21,8 @@ import os
 ///
 /// The window in use is moved by its title strip or with ⌘, which are the canvas's. A pinch over a
 /// window not in use zooms the canvas, not the app: its gesture events are taken while the tap
-/// watches and handed to the canvas; so does a two-finger scroll there pan it (zoom, with ⌥ or ⌘). A
+/// watches and handed to the canvas; so does a two-finger scroll there pan it (zoom, with ⌥ or ⌘).
+/// With `Settings.scaledHoverScroll` a plain scroll there is the app's instead, as on the Mac. A
 /// pinch or a scroll belongs to whoever had it when it began, to its end and through its momentum, as
 /// the window server routes it. Over the window in use a pinch and a scroll are the app's, as its
 /// presses are; the first event of each is held until the window's real frame is under the pointer
@@ -105,6 +106,8 @@ final class PressTap: @unchecked Sendable {
         var clickIsCanvas = false
         /// The window under the pointer is the one in use: its presses are the app's, untouched.
         var focused = false
+        /// A plain scroll over any window is the app's, in use or not (`Settings.scaledHoverScroll`).
+        var scrollIsApp = false
         /// A right press was taken; its release is swallowed too, so the app never sees an orphan.
         var rightHeld = false
         /// A pinch is under way: its every event is the canvas's until it ends.
@@ -179,6 +182,12 @@ final class PressTap: @unchecked Sendable {
     /// in front): its presses pass untouched, and a drag there is the app's.
     func setFocused(_ on: Bool) {
         state.withLock { $0.focused = on }
+    }
+
+    /// Whether a plain scroll over a window not in use is the app's (`Settings.scaledHoverScroll`)
+    /// rather than panning the canvas.
+    func setScrollIsApp(_ on: Bool) {
+        state.withLock { $0.scrollIsApp = on }
     }
 
     /// Whether a single click is the canvas's (`Settings.scaledClickZooms`) or the app's.
@@ -297,6 +306,7 @@ final class PressTap: @unchecked Sendable {
             let scrollPhase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
             let momentum = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
             let now = event.timestamp
+            let zooms = !event.flags.intersection([.maskAlternate, .maskCommand]).isEmpty
             let (taken, inPinch, appBegins) = state.withLock { s -> (Bool, Bool, Bool) in
                 if s.pinching {
                     if now > s.pinchSeen, now - s.pinchSeen > PressTap.staleGesture {
@@ -306,7 +316,9 @@ final class PressTap: @unchecked Sendable {
                         return (false, true, false)
                     }
                 }
-                let canvas = s.active && !s.focused
+                // A window not in use: the canvas pans, unless scrolling is the app's there too (then
+                // only a ⌥- or ⌘-scroll, which zooms the canvas, is the canvas's).
+                let canvas = s.active && !s.focused && (!s.scrollIsApp || zooms)
                 var taken = canvas
                 var appBegins = false
                 switch (scrollPhase, momentum) {

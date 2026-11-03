@@ -174,32 +174,30 @@ final class WindowProxy {
 
     /// The window's buttons while it's hovered, drawn over the window's own red, yellow and green
     /// ones as macOS draws them (`TrafficLights`): at a constant on-screen size, where the window's are.
-    /// `Control` lists them left to right; each keeps its slot (a pole is always the fourth).
+    /// `Control` lists them left to right. Close, minimize and green sit on the window's own; the pole and
+    /// the menu button sit in the title bar's top-right corner (`trailingControls`), the menu button last.
     enum Control: CaseIterable {
         case close
         case minimize
         /// Green: a click fills the window's area (again, puts it back); hovered or held, the tiling
         /// popover (`TilePopover`).
         case zoom
-        /// The window's magnetic pole, ⊕ or ⊖, in its tint, one place past the green button; a click
-        /// flips it. Only while `showsPolarity`.
+        /// The window's magnetic pole, ⊕ or ⊖, in its tint, in the top-right corner just before the menu
+        /// button; a click flips it. Only while `showsPolarity`.
         case polarity
+        /// A grey button with three dots in the title bar's top-right corner, the last one: pressed, it
+        /// opens the window's right-click menu under it (`CanvasView.popUpWindowMenu`).
+        case menu
 
-        var slot: Int {
-            switch self {
-            case .close: return 0
-            case .minimize: return 1
-            case .zoom: return 2
-            case .polarity: return 3
-            }
-        }
+        /// Whether it sits in the top-right group rather than over the window's own buttons.
+        var trails: Bool { self == .polarity || self == .menu }
     }
     /// A widget can't be minimized or tiled: its only button is the ✕. A window's gains its pole while
-    /// polarity is on.
+    /// polarity is on, and always ends with the menu button.
     private var availableControls: [Control] {
         switch kind {
         case .widget: return [.close]
-        case .window: return showsPolarity ? Control.allCases : [.close, .minimize, .zoom]
+        case .window: return showsPolarity ? [.close, .minimize, .zoom, .polarity, .menu] : [.close, .minimize, .zoom, .menu]
         }
     }
     /// Whether the window wears its pole: it has one, and Settings › Windows › Magnetic polarity is on
@@ -226,12 +224,26 @@ final class WindowProxy {
     /// Below this on-screen window size the buttons would cover more window than they control; they
     /// stay hidden.
     static let controlsMinWindowSize = CGSize(width: 96, height: 64)
+    /// On screen, at least this much window between the two groups, or the top-right one stays hidden.
+    static let trailingControlsGap: CGFloat = 12
+    /// From this zoom up, the top-right group stays hidden: near full size the window's own toolbar
+    /// buttons are under it and usable, and the menu is a right-click away.
+    static let trailingControlsMaxZoom: CGFloat = 0.85
 
+    /// Close, minimize and green, over the window's own.
     let controls = CALayer()
+    /// The pole and the menu button, in the title bar's top-right corner, as far in from the right edge as
+    /// the close button is from the left.
+    let trailingControls = CALayer()
+    private func group(for control: Control) -> CALayer { control.trails ? trailingControls : controls }
     /// Each button's layers. The pole's `circle` is masked to a horseshoe magnet and has `tips` and an
     /// `outline`; its glyph sits beside it rather than in it, between the arms the mask cuts away.
     private var buttons: [Control: (circle: CAGradientLayer, glyph: CAShapeLayer, tips: CAShapeLayer?, outline: CAShapeLayer?)] = [:]
     private var controlsFit = true
+    /// Whether the top-right group shows too: the window is wide enough on screen for both groups apart,
+    /// and not near full size (`trailingControlsMaxZoom`).
+    private var trailingFit = true
+    private func fits(_ control: Control) -> Bool { controlsFit && (!control.trails || trailingFit) }
 
     private let scale: CGFloat
     private var capture: WindowCapture?
@@ -409,6 +421,7 @@ final class WindowProxy {
         layer.removeFromSuperlayer()
         label.removeFromSuperlayer()
         controls.removeFromSuperlayer()
+        trailingControls.removeFromSuperlayer()
     }
 
     // MARK: Controls
@@ -424,18 +437,29 @@ final class WindowProxy {
         let d = lights.diameter
         let slop = WindowProxy.controlSlop
         let all = availableControls
+        let leading = all.filter { !$0.trails }
+        let trailing = all.filter(\.trails)
         let first = lights.centre(0)
-        let last = lights.centre(all.map(\.slot).max() ?? 0)
-        controls.anchorPoint = .zero
+        let last = lights.centre(max(0, leading.count - 1))
+        let pitch = lights.pitch
         controls.bounds = CGRect(x: 0, y: 0, width: last.x - first.x + d + 2 * slop, height: d + 2 * slop)
-        controls.opacity = 0
-        // Geometry follows the camera every frame; opacity is left animatable for the hover fade.
-        controls.actions = ["position": NSNull(), "transform": NSNull(), "bounds": NSNull()]
+        trailingControls.bounds = CGRect(x: 0, y: 0, width: CGFloat(max(0, trailing.count - 1)) * pitch + d + 2 * slop,
+                                         height: d + 2 * slop)
+        for group in [controls, trailingControls] {
+            group.anchorPoint = .zero
+            group.opacity = 0
+            // Geometry follows the camera every frame; opacity is left animatable for the hover fade.
+            group.actions = ["position": NSNull(), "transform": NSNull(), "bounds": NSNull()]
+        }
 
         let none: [String: CAAction] = ["colors": NSNull(), "borderColor": NSNull(),
                                         "strokeColor": NSNull(), "opacity": NSNull()]
         for control in all {
-            let c = lights.centre(control.slot)
+            // The top-right group counts its own places from its left, at the window's pitch.
+            let c = control.trails
+                ? CGPoint(x: first.x + CGFloat(trailing.firstIndex(of: control) ?? 0) * pitch, y: first.y)
+                : lights.centre(leading.firstIndex(of: control) ?? 0)
+            let controls = group(for: control)
             let circle = CAGradientLayer()   // top to bottom: rim, colour, the deeper edge
             circle.startPoint = CGPoint(x: 0.5, y: 1)
             circle.endPoint = CGPoint(x: 0.5, y: 0)
@@ -508,6 +532,7 @@ final class WindowProxy {
         case .minimize: return .minimize
         case .zoom: return .zoom
         case .polarity: return .pole(polarity ?? .plus)
+        case .menu: return .menu
         }
     }
 
@@ -517,6 +542,8 @@ final class WindowProxy {
     private func paintControls() {
         let onGroup = hoveredControl != nil
         let active = onGroup || NSApp?.isActive != false
+        // Marks show on the group the pointer is on: the two sit at opposite ends of the title bar.
+        let markedGroup = hoveredControl?.trails
         let dark = NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         for (control, button) in buttons {
             let look = TrafficLights.look(tone(for: control), active: active, pressed: control == pressedControl, dark: dark)
@@ -527,44 +554,49 @@ final class WindowProxy {
             button.tips?.fillColor = TrafficLights.magnetTip(active: active, pressed: control == pressedControl, dark: dark).cgColor
             button.outline?.strokeColor = look.edge.cgColor
             // The magnet always shows its sign: it says which pole the window is, not what a click does.
-            button.glyph.opacity = onGroup || control == .polarity ? 1 : 0
+            // The menu button always shows its dots: a plain grey circle would read as a window in the
+            // background's button.
+            button.glyph.opacity = markedGroup == control.trails || control == .polarity || control == .menu ? 1 : 0
         }
     }
 
     private func showControls(animated: Bool) {
         let opacity: Float = hovered && controlsFit ? 1 : 0
-        guard controls.opacity != opacity else { return }
+        let trailing: Float = hovered && controlsFit && trailingFit ? 1 : 0
+        guard controls.opacity != opacity || trailingControls.opacity != trailing else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(!animated)
         CATransaction.setAnimationDuration(0.12)
         controls.opacity = opacity
+        trailingControls.opacity = trailing
         CATransaction.commit()
     }
 
-    /// The buttons' world rect, with their slop: where the window's own buttons start, scaled with the
-    /// window (but never tight against its corner), at their on-screen size divided by the zoom. At 1:1
-    /// they cover the window's own exactly.
-    private func controlsWorldRect(zoom: CGFloat) -> CGRect {
-        let size = controls.bounds.size
+    /// A group's world rect, with its slop, at its on-screen size divided by the zoom. The left one starts
+    /// where the window's own buttons do, scaled with the window (but never tight against its corner):
+    /// at 1:1 it covers the window's own exactly. The top-right one sits as far in from the right edge,
+    /// and down from the top, as the close button is from the left.
+    private func groupWorldRect(trailing: Bool, zoom: CGFloat) -> CGRect {
+        let size = (trailing ? trailingControls : controls).bounds.size
         let lights = lightsLayout
         let first = lights.centre(0)
         let minInset = WindowProxy.controlMinInset
-        let left = max((first.x - lights.diameter / 2) * zoom, minInset)
+        let side = max((first.x - lights.diameter / 2) * zoom, minInset)
         let top = max((first.y - lights.diameter / 2) * zoom, minInset)
         let slop = WindowProxy.controlSlop
         let rect = apparentRect
-        return CGRect(x: rect.minX + (left - slop) / zoom,
-                      y: rect.minY + (top - slop) / zoom,
-                      width: size.width / zoom, height: size.height / zoom)
+        let x = trailing ? rect.maxX - (side - slop + size.width) / zoom : rect.minX + (side - slop) / zoom
+        return CGRect(x: x, y: rect.minY + (top - slop) / zoom, width: size.width / zoom, height: size.height / zoom)
     }
 
     /// Where one button's circle is, in world coordinates, while the buttons are showing: what the
-    /// tiling popover points at.
+    /// tiling popover points at, and where the menu button's menu hangs from.
     func controlWorldRect(_ control: Control) -> CGRect? {
-        guard hovered, controlsFit, let circle = buttons[control]?.circle else { return nil }
-        let rect = controlsWorldRect(zoom: lastZoom)
+        guard hovered, fits(control), let circle = buttons[control]?.circle else { return nil }
+        let g = group(for: control)
+        let rect = groupWorldRect(trailing: control.trails, zoom: lastZoom)
         let f = circle.frame   // in the group, y-up, at on-screen size
-        return CGRect(x: rect.minX + f.minX / lastZoom, y: rect.minY + (controls.bounds.height - f.maxY) / lastZoom,
+        return CGRect(x: rect.minX + f.minX / lastZoom, y: rect.minY + (g.bounds.height - f.maxY) / lastZoom,
                       width: f.width / lastZoom, height: f.height / lastZoom)
     }
 
@@ -572,10 +604,14 @@ final class WindowProxy {
     /// the group, gaps included, as a real window's.
     func control(at worldPoint: CGPoint) -> Control? {
         guard hovered, controlsFit else { return nil }
-        let rect = controlsWorldRect(zoom: lastZoom)
-        guard rect.contains(worldPoint) else { return nil }
-        let x = (worldPoint.x - rect.minX) * lastZoom
-        return buttons.min { abs($0.value.circle.frame.midX - x) < abs($1.value.circle.frame.midX - x) }?.key
+        for trails in trailingFit ? [false, true] : [false] {
+            let rect = groupWorldRect(trailing: trails, zoom: lastZoom)
+            guard rect.contains(worldPoint) else { continue }
+            let x = (worldPoint.x - rect.minX) * lastZoom
+            return buttons.filter { $0.key.trails == trails }
+                .min { abs($0.value.circle.frame.midX - x) < abs($1.value.circle.frame.midX - x) }?.key
+        }
+        return nil
     }
 
     // MARK: Frames
@@ -806,6 +842,7 @@ final class WindowProxy {
         chromeStale = true
         label.isHidden = true
         controls.isHidden = true
+        trailingControls.isHidden = true
     }
 
     /// The counter-scaled chrome: hover border, label and controls keep a constant on-screen size, so
@@ -816,6 +853,7 @@ final class WindowProxy {
             chromeStale = false
             label.isHidden = false
             controls.isHidden = false
+            trailingControls.isHidden = false
         }
         let r = caRect(apparentRect)
         if hovered || outlined { layer.borderWidth = hoverBorderWidth }
@@ -838,11 +876,15 @@ final class WindowProxy {
         }
 
         // The controls are counter-scaled the same way, anchored at their bottom-left in CA space.
-        controls.position = caRect(controlsWorldRect(zoom: zoom)).origin
+        controls.position = caRect(groupWorldRect(trailing: false, zoom: zoom)).origin
         controls.transform = CATransform3DMakeScale(1 / zoom, 1 / zoom, 1)
+        trailingControls.position = caRect(groupWorldRect(trailing: true, zoom: zoom)).origin
+        trailingControls.transform = controls.transform
         let minSize = WindowProxy.controlsMinWindowSize
         // A tile in Picture in Picture has its own chrome (✕, return) instead of the traffic lights.
         controlsFit = pip == nil && apparentRect.width * zoom >= minSize.width && apparentRect.height * zoom >= minSize.height
+        let apart = groupWorldRect(trailing: true, zoom: zoom).minX - groupWorldRect(trailing: false, zoom: zoom).maxX
+        trailingFit = zoom < WindowProxy.trailingControlsMaxZoom && apart * zoom >= WindowProxy.trailingControlsGap
         showControls(animated: false)
     }
 

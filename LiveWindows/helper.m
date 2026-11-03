@@ -19,8 +19,10 @@
 #include <Cocoa/Cocoa.h>
 #include <Security/Security.h>
 #include <libproc.h>
+#include <mach-o/fat.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
+#include <mach-o/loader.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -55,6 +57,49 @@ static NSData *embedded(const char *section)
     uint8_t *bytes = getsectiondata(&_mh_execute_header, "__TEXT", section, &size);
     if (!bytes || !size) return nil;
     return [NSData dataWithBytes:bytes length:size];
+}
+
+/// The arm64e pointer-authentication ABI a Mach-O file is built for: the top byte of its cpusubtype,
+/// 0x80 for v0 and 0x81 for v1; 0 when it has no arm64e image. The macOS 15 Dock is v0 and Xcode 26
+/// stamps what it builds v1, and the Dock won't take an add-on or loader whose ABI differs from its own.
+/// Spotted by Alvaro Almeida (spacefarm-digital/sunlight#2).
+static uint8_t arm64eABI(NSString *path)
+{
+    NSFileHandle *file = [NSFileHandle fileHandleForReadingAtPath:path];
+    NSData *data = [file readDataUpToLength:4096 error:nil];
+    [file closeFile];
+    if (data.length < sizeof(struct mach_header_64)) return 0;
+    const uint8_t *bytes = data.bytes;
+    uint32_t magic = OSSwapBigToHostInt32(*(const uint32_t *)bytes);
+    if (magic == FAT_MAGIC || magic == FAT_MAGIC_64) {
+        // A universal file: its table is big-endian, and both entry layouts start with cputype, cpusubtype.
+        uint32_t count = OSSwapBigToHostInt32(((const struct fat_header *)bytes)->nfat_arch);
+        size_t entry = magic == FAT_MAGIC ? sizeof(struct fat_arch) : sizeof(struct fat_arch_64);
+        for (uint32_t i = 0; i < count && sizeof(struct fat_header) + (i + 1) * entry <= data.length; i++) {
+            const struct fat_arch *arch = (const void *)(bytes + sizeof(struct fat_header) + i * entry);
+            uint32_t subtype = OSSwapBigToHostInt32((uint32_t)arch->cpusubtype);
+            if (OSSwapBigToHostInt32((uint32_t)arch->cputype) == CPU_TYPE_ARM64 && (subtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) return subtype >> 24;
+        }
+        return 0;
+    }
+    const struct mach_header_64 *header = (const void *)bytes;
+    uint32_t subtype = (uint32_t)header->cpusubtype;
+    if (header->magic != MH_MAGIC_64 || header->cputype != CPU_TYPE_ARM64 || (subtype & ~CPU_SUBTYPE_MASK) != CPU_SUBTYPE_ARM64E) return 0;
+    return subtype >> 24;
+}
+
+/// A built-in arm64e image relabelled with the Dock's ABI. The two ABIs share an instruction stream, so
+/// only the header changes; install() signs the result afresh.
+static NSData *matchingDock(NSData *image)
+{
+    uint8_t dock = arm64eABI(@(kDockPath));
+    if (!image || image.length < sizeof(struct mach_header_64) || !dock) return image;
+    NSMutableData *copy = [image mutableCopy];
+    struct mach_header_64 *header = copy.mutableBytes;
+    uint32_t subtype = (uint32_t)header->cpusubtype;
+    if (header->magic != MH_MAGIC_64 || (subtype & ~CPU_SUBTYPE_MASK) != CPU_SUBTYPE_ARM64E) return image;
+    header->cpusubtype = (cpu_subtype_t)((subtype & ~CPU_SUBTYPE_MASK) | ((uint32_t)dock << 24));
+    return copy;
 }
 
 static bool sipAllowsLoading(void)
@@ -202,7 +247,7 @@ static bool restartDock(void)
 /// inside the Dock, so a new one doesn't need the add-on reinstalled or the Dock restarted.
 static bool refreshLoader(void)
 {
-    NSData *loader = embedded("__loader");
+    NSData *loader = matchingDock(embedded("__loader"));
     if (!loader) return false;
     if ([[NSData dataWithContentsOfFile:kLoader] isEqualToData:loader]) return true;
     if (![loader writeToFile:kLoader atomically:YES]) return false;
@@ -215,7 +260,7 @@ static bool install(void)
 {
     umask(S_IWGRP | S_IWOTH);
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSData *loader = embedded("__loader"), *payload = embedded("__payload");
+    NSData *loader = matchingDock(embedded("__loader")), *payload = matchingDock(embedded("__payload"));
     if (!loader || !payload) {
         fprintf(stderr, "SunlightLiveWindows: the add-on isn't built into this helper\n");
         return false;
@@ -272,7 +317,9 @@ static int load(void)
         return 1;
     }
     const char *user = consoleUser();
-    bool current = [installedVersion() isEqualToString:@OSAX_VERSION];
+    // An add-on installed before a macOS update can carry the old Dock's ABI: reinstall it relabelled.
+    uint8_t dockABI = arm64eABI(@(kDockPath));
+    bool current = [installedVersion() isEqualToString:@OSAX_VERSION] && (!dockABI || arm64eABI(kPayloadBinary) == dockABI);
     if (current && [answeringVersion(user, 0) isEqualToString:@OSAX_VERSION]) {
         printf("SunlightLiveWindows: already loaded\n");
         return 0;
@@ -337,6 +384,9 @@ static int status(void)
     printf("Add-on: %s\n", version ? [[NSString stringWithFormat:@"%@ installed (this helper carries %s)", version, OSAX_VERSION] UTF8String] : "not installed");
     NSString *answer = answeringVersion(consoleUser(), 0);
     printf("In the Dock: %s\n", answer ? [[NSString stringWithFormat:@"answering (%@)", answer] UTF8String] : "not answering");
+    uint8_t dock = arm64eABI(@(kDockPath)), installed = arm64eABI(kPayloadBinary);
+    printf("Dock ABI: %s\n", dock ? [[NSString stringWithFormat:@"arm64e v%d%@", dock & 0x0f,
+        installed && installed != dock ? [NSString stringWithFormat:@" (the installed add-on is v%d; `load` relabels it)", installed & 0x0f] : @""] UTF8String] : "unknown");
     printf("System Integrity Protection: %s\n", sipAllowsLoading() ? "allows loading" : "blocks loading (Filesystem Protections and Debugging Restrictions must be off)");
     printf("Boot arguments: %s\n", bootArgsAllowLoading() ? "allow loading" : "block loading (-arm64e_preview_abi is needed)");
     return 0;

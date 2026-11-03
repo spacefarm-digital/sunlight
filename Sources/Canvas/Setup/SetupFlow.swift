@@ -117,14 +117,28 @@ enum SetupFlow {
     /// Whether the wizard opens by itself at launch. Always to finish what it sent the person away
     /// for. In preview mode (live windows have never loaded here), only while the preview isn't ready:
     /// the two permissions, a first Welcome, or the tutorial not yet seen. Past preview mode, as the checkbox says: while a
-    /// live-windows step is missing, unless that was turned off.
-    static func opensAtLaunch(status: SetupStatus, record: Record, mac: Mac, previewMode: Bool, showsAtLaunch: Bool) -> Bool {
+    /// live-windows step is missing, unless that was turned off. Not for the add-on alone when the canvas
+    /// reloads it by itself: quitting puts the Mac's Dock settings back and restarts the Dock, which unloads
+    /// it, so it's missing at nearly every launch for a moment (public issue #10).
+    static func opensAtLaunch(status: SetupStatus, record: Record, mac: Mac, previewMode: Bool, showsAtLaunch: Bool,
+                              quietReloadPaused: Bool = false) -> Bool {
         if record.resume != nil { return true }
         if previewMode {
             return !record.welcomed || !record.loginItemChosen || !status.accessibility || !status.screenRecording && !record.skippedScreenRecording
                 || !record.learnedBasics
         }
+        if onlyTheAddOnIsMissing(status), reloadsQuietly(status), !quietReloadPaused { return false }
         return showsAtLaunch && !status.isComplete
+    }
+
+    /// Every step is done but the add-on answering in the Dock.
+    static func onlyTheAddOnIsMissing(_ status: SetupStatus) -> Bool {
+        status.missing.map(\.step) == [.liveWindows]
+    }
+
+    /// The canvas's own reload (`CanvasController.reloadAddition`) needs nothing from the person.
+    static func reloadsQuietly(_ status: SetupStatus) -> Bool {
+        status.helper == .daemonEnabled || status.helper == .passwordless
     }
 
     // MARK: The rail

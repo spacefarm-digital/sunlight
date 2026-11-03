@@ -31,6 +31,11 @@ The add-on and its loader are Sunlight's own code in `osax/`, adapted from yabai
 - `helper.m`: `SunlightLiveWindows`, the one program that runs as root, through sudo or as the launch
   daemon. The payload and loader are built into its `__TEXT` segment, so the sudoers rule's hash covers
   everything. A newer built-in loader replaces the installed one without reinstalling the add-on.
+  Before installing, it relabels the payload and loader with the Dock's own arm64e PAC ABI version
+  (the top byte of the Mach-O cpusubtype): the macOS 15 Dock is v0 and Xcode 26 builds v1, and the
+  Dock won't take a mismatch. Only that header byte differs between the two, and the helper re-signs
+  both ad-hoc after writing them. `status` prints the Dock's ABI. Spotted by Alvaro Almeida in
+  spacefarm-digital/sunlight#2.
 
 The stock `0x0D` scale operation is a thumbnail toggle. It is **never used** for camera updates.
 

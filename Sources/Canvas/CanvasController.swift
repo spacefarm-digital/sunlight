@@ -485,7 +485,7 @@ final class CanvasController {
                                                           object: nil, queue: .main) { [weak self] n in
             let pid = (n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
             MainActor.assumeIsolated {
-                if let self, let pid, self.passingThrough?.pid == pid { self.usedScaledPIDs.insert(pid) }
+                if let self, let pid, self.isScaledUseActivation(pid) { self.usedScaledPIDs.insert(pid) }
                 self?.scheduleCapturePass(after: 0.05)
                 self?.scheduleDiff(after: 0.3)
             }
@@ -5903,7 +5903,9 @@ final class CanvasController {
     /// `from`: where the window is drawn now, in the world (where it opened), so that on the live canvas
     /// it glides from there to its spot with the camera's flight rather than jumping to the spot (off the
     /// screen, for one over to it) the moment the canvas comes forward, and sliding in from there.
-    private func slide(into p: WindowProxy, onScreen: Bool, from: CGPoint? = nil) {
+    /// `known`: a window already on the canvas (brought forward by the Dock, Spotlight, ⌘`), drawn at its
+    /// place all the way there rather than held back or gliding in, as a new window is.
+    private func slide(into p: WindowProxy, onScreen: Bool, from: CGPoint? = nil, known: Bool = false) {
         NSLog("New window: \(p.appName) — \(p.title) opened over others — to \(p.worldRect.origin)\(onScreen ? ", on screen" : ", over to it")")
         holdKeys(for: p)
         // One sliding in at a time: one before it whose placement this replaces shows where it is.
@@ -5911,7 +5913,9 @@ final class CanvasController {
         slidingIn = p
         // Under the canvas until the pan lands (live windows, sunlight-27): drawn at its spot the moment
         // the canvas came forward, it showed beside the window in use for the frames before the pan.
-        p.heldBack = renderer == .realWindows && additionNumber >= 27
+        // A window the canvas already showed stays drawn where it is: held back, it was missing from its
+        // place for the whole pan and showed up only as the camera landed on it.
+        p.heldBack = !known && renderer == .realWindows && additionNumber >= 27
         let asked = CACurrentMediaTime()
         // Whatever becomes of the placement (replaced by a tidy or a layout, a handoff already under way,
         // the canvas never coming forward), the window isn't left held back and parked off the screen.
@@ -5928,7 +5932,7 @@ final class CanvasController {
                 if let p { self.unpark(p) }
                 return self.dropHeldKeys()
             }
-            let gliding = self.renderer == .realWindows ? from : nil
+            let gliding = self.renderer == .realWindows && !known ? from : nil
             if onScreen {
                 self.handoff(to: p, placement: .inPlace(around: self.view.camera.toScreen(CGPoint(x: p.worldRect.midX, y: p.worldRect.midY))), gliding: gliding)
             } else {
@@ -5950,7 +5954,10 @@ final class CanvasController {
               let front = NSWorkspace.shared.frontmostApplication?.processIdentifier,
               front == activeProxy?.pid || front == pendingAbsorbPID else { return unhideArrival(id) }
         let deadline = deadline ?? CACurrentMediaTime() + CanvasController.arrivalWatch
-        guard let listed = WindowList.onScreen(id) else {
+        // Not listed yet, or listed but still invisible: Chrome puts a new window on screen at alpha 0
+        // for a few frames before it shows (public issue #9), and taken as it is, it would fail
+        // `isCanvasMaterial` and be lifted above the canvas for good. Looked at again next frame.
+        guard let listed = WindowList.onScreen(id), listed.alpha > 0 || CACurrentMediaTime() >= deadline else {
             guard CACurrentMediaTime() < deadline else { return unhideArrival(id) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { [weak self] in
                 MainActor.assumeIsolated { self?.takeInFront(id, until: deadline) }
@@ -6345,12 +6352,17 @@ final class CanvasController {
         guard pid != activeProxy?.pid, pid != pendingAbsorbPID else { return }
         // A click in a window used where it's drawn (`usingScaledWindow`) brought its app forward: the
         // canvas stays as it is, and nothing is entered.
-        if activeProxy == nil, passingThrough?.pid == pid || usedScaledPIDs.contains(pid) {
+        // Only this activation counts, not having used the app that way earlier: brought forward by a
+        // Dock click, Spotlight or the app itself, it's a way over to its window like any other app's,
+        // and the canvas goes there. (Kept while any app used where it's drawn had the front, the Dock
+        // click went nowhere; so did one with the pointer still taken for the window behind the Dock.)
+        if activeProxy == nil, isScaledUseActivation(pid) {
             usedScaledPIDs.insert(pid)
             NSLog("Scaled use: \(app.localizedName ?? "pid \(pid)") came forward from its window on the canvas — the canvas stays")
             reassertCanvasOver(usedScaledApp: pid)
             return
         }
+        usedScaledPIDs.remove(pid)
 
         let onCanvas = activeProxy == nil   // before `leaveEntered` clears it
         view.cancelAnimation()   // also clears `handingOff`, so a stale handoff can't land later
@@ -6566,7 +6578,7 @@ final class CanvasController {
             // other than where the canvas has it: windows were never moved natively while on the canvas,
             // so several of them sat stacked where macOS last had them, and entering one there stacked
             // the real ones the same way. Its place on the canvas is the truth: the canvas goes over to
-            // it there, the window gliding from where it came up to its place as the camera goes.
+            // it there, the window drawn at its place all the way (`known`), as it was before the click.
             // Likewise one that is where the canvas has it but mostly off the screen (the canvas has it
             // a screen away from the window the user was in): entered where it is, it stayed off the screen.
             let screen = toGlobal(visibleTopLeft)
@@ -6577,7 +6589,7 @@ final class CanvasController {
                 p.ax = ax
                 p.owner = .canvas
                 clearPending()
-                return slide(into: p, onScreen: false, from: view.camera.toWorld(toView(real).origin))
+                return slide(into: p, onScreen: false, known: true)
             }
             adopt(p, ax: ax, real: real)
             return
@@ -6677,7 +6689,7 @@ final class CanvasController {
             p.ax = ax
             p.owner = .canvas   // its place on the canvas is the truth; the canvas goes over to it
             NSLog("Absorb: sibling \(p.appName) — \(p.title) is off screen where the canvas has it — over to it")
-            return slide(into: p, onScreen: false)
+            return slide(into: p, onScreen: false, known: true)
         }
         NSLog("Absorb: sibling \(p.appName) — \(p.title) at \(real.integral)")
         liftWindow(p)
@@ -7107,6 +7119,7 @@ final class CanvasController {
             if oldValue !== passingThrough { syncPressTapFocus() }
             if (oldValue == nil) != (passingThrough == nil) {
                 pressTap.setClickIsCanvas(Settings.scaledClickZooms)
+                pressTap.setScrollIsApp(Settings.scaledHoverScroll)
                 pressTap.setActive(passingThrough != nil)
             }
         }
@@ -7239,6 +7252,18 @@ final class CanvasController {
     /// handing the windows back.
     private var usedScaledPIDs: Set<pid_t> = []
 
+    /// The app `focusInPlace` just asked to come forward, until when its activation is still on the way.
+    private var scaledFocusAsked: (pid: pid_t, until: CFTimeInterval)?
+
+    /// Whether an app coming forward is the user using one of its windows where it's drawn: a click
+    /// through into it (the pointer over its window, and not over the Dock, which sits in front of the
+    /// canvas and leaves `passingThrough` on the window drawn behind it) or a focus the canvas just
+    /// asked for (`focusInPlace`).
+    private func isScaledUseActivation(_ pid: pid_t) -> Bool {
+        if let asked = scaledFocusAsked, asked.pid == pid, CACurrentMediaTime() < asked.until { return true }
+        return passingThrough?.pid == pid && !WindowList.pointerOverDock()
+    }
+
     private var usingScaledWindow: Bool {
         guard activeProxy == nil else { return false }
         if passingThrough != nil { return true }
@@ -7287,6 +7312,7 @@ final class CanvasController {
         }
         let pid = p.pid, ax = p.ax
         usedScaledPIDs.insert(pid)
+        scaledFocusAsked = (pid, CACurrentMediaTime() + 1)
         focusedScaledID = p.windowID
         AXQueue.interactive.async { [weak self] in
             ax?.raise()

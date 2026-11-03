@@ -55,6 +55,26 @@ final class TrafficLightsTests: XCTestCase {
         XCTAssertEqual(TrafficLights.look(.close, active: false, pressed: false, dark: true).fill, inactive.fill)
     }
 
+    func testMenuButtonIsGreyWithThreeDotsThatAlwaysShow() {
+        for active in [true, false] {
+            for dark in [true, false] {
+                let look = TrafficLights.look(.menu, active: active, pressed: false, dark: dark)
+                XCTAssertEqual(look.fill.saturationComponent, 0, accuracy: 0.01, "grey")
+                XCTAssertGreaterThan(look.glyph.alphaComponent, 0, "the dots show even in the background")
+            }
+        }
+        let rest = TrafficLights.look(.menu, active: true, pressed: false, dark: false)
+        let pressed = TrafficLights.look(.menu, active: true, pressed: true, dark: false)
+        XCTAssertLessThan(pressed.fill.brightnessComponent, rest.fill.brightnessComponent)
+        XCTAssertTrue(TrafficLights.glyphIsFilled(.menu))
+        let box = CGRect(x: 0, y: 0, width: 14, height: 14)
+        let dots = TrafficLights.glyph(.menu, in: box)
+        for x in [7 - 14 * 0.24, 7, 7 + 14 * 0.24] {
+            XCTAssertTrue(dots.contains(CGPoint(x: x, y: 7)), "a dot at \(x)")
+        }
+        XCTAssertFalse(dots.contains(CGPoint(x: 7 - 14 * 0.12, y: 7)), "space between the dots")
+    }
+
     func testMagnetIsAHorseshoeWithItsSignBetweenTheArms() {
         let box = CGRect(x: 0, y: 0, width: 16, height: 16)
         let body = TrafficLights.magnet(in: box)

@@ -404,6 +404,7 @@ enum Settings {
     private static let useScaledWindowsKey = "UseScaledWindowsEnabled"
     private static let scaledClickZoomsKey = "UseScaledWindowsClickZooms"
     private static let scaledHoverFocusKey = "UseScaledWindowsHoverFocus"
+    private static let scaledHoverScrollKey = "UseScaledWindowsHoverScroll"
 
     /// The feature flag for arranging: Arrange (⌃⌥2/3/4, 2×2, 3×2, the windows of one screen) and Tidy
     /// (⌃⌥A, Tidy By, everything). Off by default: no menu items, keys, panel tile or Settings rows, and
@@ -462,6 +463,14 @@ enum Settings {
     static var scaledHoverFocus: Bool {
         get { defaults.bool(forKey: scaledHoverFocusKey) }
         set { defaults.set(newValue, forKey: scaledHoverFocusKey) }
+    }
+
+    /// With windows used at any zoom: a two-finger scroll or mouse wheel over any window scrolls it,
+    /// clicked into or not, as scrolling does on the Mac (public issue #6). The canvas pans by scrolling
+    /// over empty space; ⌥- or ⌘-scroll over a window still zooms the canvas.
+    static var scaledHoverScroll: Bool {
+        get { defaults.bool(forKey: scaledHoverScrollKey) }
+        set { defaults.set(newValue, forKey: scaledHoverScrollKey) }
     }
 
     private static let tellSunlightKey = "TellSunlightEnabled"
@@ -1854,7 +1863,7 @@ private struct ExperimentalPane: View {
                 }
                 LabCard(kind: .anyZoom, title: "Use windows at any zoom",
                         line: "Click and type in windows while zoomed out.",
-                        info: "Live windows only. A click focuses a window; until then a drag anywhere moves it. Once you’re in it, drags are the app’s own (select text, drag a file), the title bar or ⌘ moves it, and a double-click still brings it to the middle at 1:1. Scroll bars and sliders are always the app’s. Right-click opens Sunlight’s window menu anywhere on a window. Pinch and two-finger scroll over a window move the canvas until you’re in the window; then they’re the window’s.",
+                        info: "Live windows only. A click focuses a window; until then a drag anywhere moves it. Once you’re in it, drags are the app’s own (select text, drag a file), the title bar or ⌘ moves it, and a double-click still brings it to the middle at 1:1. Scroll bars and sliders are always the app’s. Right-click opens Sunlight’s window menu anywhere on a window. Pinch and two-finger scroll over a window move the canvas until you’re in the window; then they’re the window’s. With Scroll the window under the pointer on, scrolling is the window’s from the start.",
                         on: model.bind({ Settings.useScaledWindows }, { Settings.useScaledWindows = $0 })) {
                     Toggle(isOn: model.bind({ Settings.scaledClickZooms }, { Settings.scaledClickZooms = $0 })) {
                         RowLabel(title: "Single click zooms in",
@@ -1863,6 +1872,10 @@ private struct ExperimentalPane: View {
                     Toggle(isOn: model.bind({ Settings.scaledHoverFocus }, { Settings.scaledHoverFocus = $0 })) {
                         RowLabel(title: "Focus follows the pointer",
                                  subtitle: "No click needed to focus.")
+                    }
+                    Toggle(isOn: model.bind({ Settings.scaledHoverScroll }, { Settings.scaledHoverScroll = $0 })) {
+                        RowLabel(title: "Scroll the window under the pointer",
+                                 subtitle: "No click needed to scroll. Scroll on empty space to move the canvas.")
                     }
                 }
                 LabCard(kind: .agent, title: "Tell Sunlight",

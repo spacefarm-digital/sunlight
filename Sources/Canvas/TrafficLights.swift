@@ -3,7 +3,8 @@ import AppKit
 /// The red, yellow and green buttons in a window's top-left corner, as the canvas draws its own over a
 /// window: where the window's own sit (`Layout`), and how macOS paints them (`Tone`, `Look`). The
 /// green one fills the window's area and, held or hovered, offers the tiling popover (`TilePopover`); the
-/// window's magnetic pole, while polarity is on, sits one place past it.
+/// window's magnetic pole (while polarity is on) and a grey menu button sit in the title bar's top-right
+/// corner (`WindowProxy.trailingControls`), the menu button last.
 enum TrafficLights {
     /// Where a window's buttons are: each one's centre from the window's top-left, in the real window's
     /// points (world units, at 1:1), and their diameter. Close, minimize, zoom, left to right.
@@ -23,7 +24,7 @@ enum TrafficLights {
         }
 
         /// The centre of the `i`th button from the left; past the window's own buttons, carried on at
-        /// the same pitch (the pole sits past the green button; a window without one still gets both).
+        /// the same pitch (a window without a green button still gets one).
         func centre(_ i: Int) -> CGPoint {
             if centres.indices.contains(i) { return centres[i] }
             guard let last = centres.last else { return Layout.standard.centre(i) }
@@ -53,8 +54,10 @@ enum TrafficLights {
     /// Which paint a button wears.
     enum Tone: Equatable {
         case close, minimize, zoom
-        /// The magnet past the green button: its pole's colour.
+        /// The magnet in the top-right corner: its pole's colour.
         case pole(Polarity)
+        /// The menu button, last in the top-right corner: grey, three dots.
+        case menu
 
         var isPole: Bool {
             if case .pole = self { return true }
@@ -80,6 +83,8 @@ enum TrafficLights {
             look = dark
                 ? Look(highlight: rgb(0x9A9A9A), fill: rgb(0x4D4D4D), edge: rgb(0x474747), glyph: .clear)
                 : Look(highlight: rgb(0xEFEFEF), fill: rgb(0xDCDCDC), edge: rgb(0xC9C9C9), glyph: .clear)
+            // The menu button keeps its dots in the background: a bare grey circle says nothing.
+            if tone == .menu { look.glyph = dark ? rgb(0xB5B5B5) : rgb(0x7A7A7A) }
         } else {
             switch tone {
             case .close:
@@ -88,6 +93,11 @@ enum TrafficLights {
                 look = Look(highlight: rgb(0xFEDD61), fill: rgb(0xF3C22D), edge: rgb(0xF3BE00), glyph: rgb(0x8A5300))
             case .zoom:
                 look = Look(highlight: rgb(0x9BED75), fill: rgb(0x62BD2E), edge: rgb(0x4CB900), glyph: rgb(0x0E5A00))
+            case .menu:
+                // Grey as well, a shade deeper than the background grey, with dark dots.
+                look = dark
+                    ? Look(highlight: rgb(0xA8A8A8), fill: rgb(0x7C7C7C), edge: rgb(0x6E6E6E), glyph: rgb(0x1E1E1E))
+                    : Look(highlight: rgb(0xD9D9D9), fill: rgb(0xB2B2B2), edge: rgb(0x9C9C9C), glyph: rgb(0x3A3A3A))
             case .pole(let pole):
                 let tint = pole.tint
                 look = Look(highlight: tint.blended(withFraction: 0.45, of: .white) ?? tint, fill: tint,
@@ -138,6 +148,12 @@ enum TrafficLights {
             path.addLine(to: CGPoint(x: c.x - s, y: c.y - r))
             path.addLine(to: CGPoint(x: c.x + r, y: c.y + s))
             path.closeSubpath()
+        case .menu:
+            // Three dots across the middle, filled (`glyphIsFilled`).
+            let r = d * 0.055, gap = d * 0.24
+            for dx in [-gap, 0, gap] {
+                path.addEllipse(in: CGRect(x: c.x + dx - r, y: c.y - r, width: 2 * r, height: 2 * r))
+            }
         case .pole(let pole):
             // In the gap between the magnet's arms (`magnet`), above the bend.
             let r = d * 0.13
@@ -205,8 +221,8 @@ enum TrafficLights {
         }
     }
 
-    /// Whether the glyph is a shape to fill (the zoom triangles) rather than lines.
-    static func glyphIsFilled(_ tone: Tone) -> Bool { tone == .zoom }
+    /// Whether the glyph is a shape to fill (the zoom triangles, the menu's dots) rather than lines.
+    static func glyphIsFilled(_ tone: Tone) -> Bool { tone == .zoom || tone == .menu }
 
     /// The glyph's stroke for a circle of `diameter`: a little over a point at 14.
     static func glyphWidth(diameter: CGFloat) -> CGFloat { max(1, diameter * 0.085) }

@@ -702,6 +702,7 @@ final class CanvasView: NSView {
         proxiesLayer(for: proxy).addSublayer(proxy.layer)
         chromeLayer.addSublayer(proxy.label)
         chromeLayer.addSublayer(proxy.controls)
+        chromeLayer.addSublayer(proxy.trailingControls)
         proxy.layout(zoom: camera.zoom)
         orderPipOnTop()   // a new window goes under the tiles
         if arriving { beginEntrance(proxy, context: WindowEffect.Context()) }
@@ -2552,8 +2553,14 @@ final class CanvasView: NSView {
         if let p = proxy(at: worldPoint) {
             if showsDesktop { onDesktopDismissed?() }
             if let control = p.control(at: worldPoint) {
-                // Pressed now, done on the release if the pointer is still on it, as a real window's.
                 dragging = nil
+                // The menu button opens its menu on the press, as a pop-up button does: drag to an item
+                // and let go, or click and pick.
+                if control == .menu {
+                    popUpWindowMenu(for: p)
+                    return
+                }
+                // Pressed now, done on the release if the pointer is still on it, as a real window's.
                 controlPress = (p, control)
                 p.pressedControl = control
                 if control == .zoom { startZoomHold(p) }
@@ -2703,6 +2710,7 @@ final class CanvasView: NSView {
                     tilePopover.close()
                     onZoom?(p)
                 case .polarity: onFlipPolarity?(p)
+                case .menu: break   // opened on the press
                 }
             }
             updateHover(at: topLeftPoint(event))
@@ -2997,6 +3005,20 @@ final class CanvasView: NSView {
     /// the click (top-left origin), whether or not the canvas is key.
     func showTileMenu(for proxy: WindowProxy, atTopLeft point: CGPoint) {
         tileMenu(for: proxy).popUp(positioning: nil, at: CGPoint(x: point.x, y: bounds.height - point.y), in: self)
+    }
+
+    /// The window's right-click menu (`tileMenu`), from its menu button: hung just under the button,
+    /// left edges lined up, the button held darker while it's open.
+    private func popUpWindowMenu(for proxy: WindowProxy) {
+        guard let button = proxy.controlWorldRect(.menu) else { return }
+        tilePopover.close()   // one menu at a time
+        let onScreen = camera.toScreen(button)
+        let menu = tileMenu(for: proxy)
+        proxy.pressedControl = .menu
+        // Tracks the menu until it closes; a pick runs its action before this returns.
+        menu.popUp(positioning: nil, at: CGPoint(x: onScreen.minX, y: bounds.height - onScreen.maxY - 3), in: self)
+        proxy.pressedControl = nil
+        updateHover(at: pointerTopLeft)
     }
 
     private func pinch(_ event: NSEvent, at screenPoint: CGPoint) {

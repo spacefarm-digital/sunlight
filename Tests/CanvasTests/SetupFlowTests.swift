@@ -135,8 +135,15 @@ final class SetupFlowTests: XCTestCase {
         back.resume = .recovery
         XCTAssertTrue(SetupFlow.opensAtLaunch(status: permissionsDone, record: back, mac: .supported, previewMode: true, showsAtLaunch: false))
         // Past preview mode, the checkbox rules while a live step is missing.
-        XCTAssertTrue(SetupFlow.opensAtLaunch(status: status(loaded: false), record: live, mac: .supported, previewMode: false, showsAtLaunch: true))
-        XCTAssertFalse(SetupFlow.opensAtLaunch(status: status(loaded: false), record: live, mac: .supported, previewMode: false, showsAtLaunch: false))
+        XCTAssertTrue(SetupFlow.opensAtLaunch(status: status(bootArgument: false, loaded: false), record: live, mac: .supported, previewMode: false, showsAtLaunch: true))
+        XCTAssertFalse(SetupFlow.opensAtLaunch(status: status(bootArgument: false, loaded: false), record: live, mac: .supported, previewMode: false, showsAtLaunch: false))
+        XCTAssertFalse(SetupFlow.opensAtLaunch(status: status(loaded: false), record: live, mac: .supported, previewMode: false, showsAtLaunch: true),
+                       "only the add-on is missing (a Dock restarted at the last quit) and the helper reloads it quietly")
+        XCTAssertFalse(SetupFlow.opensAtLaunch(status: status(helper: .passwordless, loaded: false), record: live, mac: .supported, previewMode: false, showsAtLaunch: true))
+        XCTAssertTrue(SetupFlow.opensAtLaunch(status: status(helper: .asksForPassword, loaded: false), record: live, mac: .supported, previewMode: false, showsAtLaunch: true),
+                      "the reload would ask for a password: the wizard's Load page asks instead")
+        XCTAssertTrue(SetupFlow.opensAtLaunch(status: status(loaded: false), record: live, mac: .supported, previewMode: false, showsAtLaunch: true,
+                                              quietReloadPaused: true), "quiet reloads stopped after Dock crashes")
         XCTAssertFalse(SetupFlow.opensAtLaunch(status: status(), record: live, mac: .supported, previewMode: false, showsAtLaunch: true))
     }
 

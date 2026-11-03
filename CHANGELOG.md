@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- Live windows start on macOS 15 again: the Dock add-on is now installed with the Dock's own arm64e ABI, which newer Xcode versions build differently, and an add-on that no longer matches (after a macOS update, say) is reinstalled when it loads. Found by Alvaro Almeida (#2).
+- Use windows at any zoom has a new option, Scroll the window under the pointer (off by default): a two-finger scroll or mouse wheel over any window scrolls it, clicked into or not, as on the Mac. Scroll over empty space to move the canvas; ⌥- or ⌘-scroll over a window still zooms (#6).
+- Each window's hover controls have a menu button that opens its window menu, the same as a right-click. It sits with the magnet in the title bar's top-right corner; close, minimize and the green button stay over the window's own.
+- Setup no longer opens at launch just because the Dock add-on isn't answering yet: with the background helper on, Sunlight reloads it by itself (#10).
+- New Chrome windows (incognito windows, tabs dragged out) are taken onto the canvas instead of being left on top of it (#9).
+- Clicking an app in the Dock after using it at a zoom goes to its window again, and the window stays drawn in its place while the canvas moves to it.
+
 ## 0.2
 
 - Picture in Picture for any window: right-click a window > Picture in Picture (or ⌃⌥P over it, or from inside it) and it flies into a corner of the screen as a small live tile, the way a video does, and stays there wherever the canvas goes and while you work in anything else: a call, a video, a timer. It's still the real window, so a click in it works. Drag the tile and it springs to the nearest corner (a fling goes to the corner it's heading for; hold ⌘ to leave it anywhere); drag it past the left or right edge to tuck it away, leaving a tab that brings it back; resize it from its edges, or pinch, and it keeps its shape. Click it and it opens full size where the tile is, and shrinks back into its corner when the canvas comes back; hover it for the home button (back to its place on the canvas). Several windows can be tiles at once, each in its own corner, and tiles are remembered with the canvas and saved in layouts.

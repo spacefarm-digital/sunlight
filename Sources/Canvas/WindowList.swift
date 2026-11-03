@@ -76,6 +76,15 @@ enum WindowList {
         return (entry[kCGWindowIsOnscreen as String] as? Bool) ?? false
     }
 
+    /// Whether the pointer is on the Dock right now: on a window of the Dock's own at the Dock's level,
+    /// as the window server has it. The canvas can't tell by itself, as the Dock sits in front of it.
+    static func pointerOverDock() -> Bool {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier,
+              let pointer = CGEvent(source: nil)?.location else { return false }
+        let level = Int(CGWindowLevelForKey(.dockWindow))
+        return onScreen().contains { $0.pid == dock && $0.layer == level && $0.alpha > 0 && $0.bounds.contains(pointer) }
+    }
+
     private typealias GetWindowOwner = @convention(c) (Int32, CGWindowID, UnsafeMutablePointer<Int32>) -> Int32
     private typealias MainConnectionID = @convention(c) () -> Int32
 
