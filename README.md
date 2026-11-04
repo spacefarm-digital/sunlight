@@ -4,8 +4,8 @@
 
 # Sunlight
 
-**Every window on your Mac, on one infinite canvas.**<br>
-Zoom out to see all of it. Click a window and you're in it, for real, at 1:1.
+**The first camera-based inifinite canvas window manager for Mac**<br>
+Free, open source and yours forever.
 
 [![macOS 15+](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)](#requirements)
 [![Apple silicon](https://img.shields.io/badge/Apple%20silicon-only-black)](#requirements)
