@@ -864,8 +864,7 @@ final class WindowProxy {
         // widgets side by side are narrower than their labels at most zooms.
         label.position = CGPoint(x: r.minX, y: r.maxY + 6 / zoom)
         label.transform = CATransform3DMakeScale(1 / zoom, 1 / zoom, 1)
-        // A tile in Picture in Picture has no label: its chrome names it on hover, as a video's does.
-        let labelShown: Float = zoom < 0.85 && pip == nil ? 1 : 0
+        let labelShown: Float = labelShown(zoom: zoom) ? 1 : 0
         let labelOpacity = labelShown * effect.opacity
         if label.opacity != labelOpacity { label.opacity = labelOpacity }
         if labelShown > 0 {
@@ -893,7 +892,21 @@ final class WindowProxy {
         effect = frame
         effectZoom = zoom
         applyEffect()
-        label.opacity = (lastZoom < 0.85 && pip == nil ? 1 : 0) * frame.opacity
+        label.opacity = (labelShown(zoom: lastZoom) ? 1 : 0) * frame.opacity
+    }
+
+    /// Whether the label shows at this zoom: zoomed out (near 1:1 the real title bar takes over), with
+    /// Settings › Canvas › Window names on, and not for a tile in Picture in Picture, whose chrome names
+    /// it on hover, as a video's does.
+    func labelShown(zoom: CGFloat) -> Bool {
+        zoom < 0.85 && pip == nil && Settings.showWindowLabels
+    }
+
+    /// Settings › Canvas › Window names was switched: the label comes or goes at the zoom it was laid
+    /// out for. Stale chrome (far off screen) is left for `layoutChrome` to bring back as the setting has it.
+    func windowLabelsSettingChanged() {
+        guard !chromeStale else { return }
+        layoutChrome(zoom: lastZoom)
     }
 
     /// The layer's anchor is its bottom-left corner and its space is y-up, so a scale about the frame's

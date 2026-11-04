@@ -309,3 +309,104 @@ final class TellSunlightInAppsTests: XCTestCase {
         XCTAssertFalse(AgentRun.system(apps: false).contains("app_snapshot"))
     }
 }
+
+/// Tell Sunlight's on-screen pointer (`AgentPresence`): where it goes.
+@MainActor
+final class TellSunlightPresenceTests: XCTestCase {
+    func testControlIsAFractionOfItsWindow() {
+        let window = CGRect(x: 100, y: 200, width: 800, height: 600)
+        let button = CGRect(x: 500, y: 260, width: 80, height: 30)
+        let unit = PresenceGeometry.unit(of: button, in: window)
+        XCTAssertEqual(unit.minX, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(unit.minY, 0.1, accuracy: 1e-9)
+        XCTAssertEqual(unit.width, 0.1, accuracy: 1e-9)
+        XCTAssertEqual(unit.height, 0.05, accuracy: 1e-9)
+    }
+
+    /// A window drawn at half size on the canvas, somewhere else: the control lands on its drawn place.
+    func testControlLandsWhereTheWindowIsDrawn() {
+        let window = CGRect(x: 100, y: 200, width: 800, height: 600)
+        let button = CGRect(x: 500, y: 260, width: 80, height: 30)
+        let drawn = CGRect(x: 1000, y: 50, width: 400, height: 300)
+        let placed = PresenceGeometry.place(PresenceGeometry.unit(of: button, in: window), in: drawn)
+        XCTAssertEqual(placed.minX, 1200, accuracy: 1e-9)
+        XCTAssertEqual(placed.minY, 80, accuracy: 1e-9)
+        XCTAssertEqual(placed.width, 40, accuracy: 1e-9)
+        XCTAssertEqual(placed.height, 15, accuracy: 1e-9)
+    }
+
+    func testControlPartlyOutsideIsCutToTheWindow() {
+        let window = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let page = CGRect(x: 0, y: 100, width: 1000, height: 5000)   // a web area much taller than the window
+        let unit = PresenceGeometry.unit(of: page, in: window)
+        XCTAssertEqual(unit.minY, 0.1, accuracy: 1e-9)
+        XCTAssertEqual(unit.maxY, 1, accuracy: 1e-9)
+    }
+
+    func testControlScrolledAwayGoesToTheEdgeWithNoOutline() {
+        let window = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let below = CGRect(x: 400, y: 3000, width: 100, height: 20)
+        let unit = PresenceGeometry.unit(of: below, in: window)
+        XCTAssertEqual(unit.size, .zero)
+        XCTAssertEqual(unit.minX, 0.45, accuracy: 1e-9)
+        XCTAssertEqual(unit.minY, 1, accuracy: 1e-9)
+    }
+
+    func testNoFramesGiveTheMiddle() {
+        XCTAssertEqual(PresenceGeometry.unit(of: nil, in: CGRect(x: 0, y: 0, width: 10, height: 10)),
+                       CGRect(x: 0.5, y: 0.5, width: 0, height: 0))
+        XCTAssertEqual(PresenceGeometry.unit(of: CGRect(x: 1, y: 1, width: 1, height: 1), in: nil),
+                       CGRect(x: 0.5, y: 0.5, width: 0, height: 0))
+    }
+
+    /// The title bar spot scales with the zoom the window is drawn at.
+    func testOffsetScalesWithZoom() {
+        let p = PresenceGeometry.point(unit: CGPoint(x: 0.5, y: 0), offset: CGPoint(x: 0, y: 15),
+                                       in: CGRect(x: 0, y: 0, width: 400, height: 300), zoom: 0.5)
+        XCTAssertEqual(p, CGPoint(x: 200, y: 7.5))
+    }
+
+    func testOffScreenSpotWaitsAtTheEdge() {
+        let display = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let inside = PresenceGeometry.clamp(CGPoint(x: 700, y: 400), into: display, inset: 36)
+        XCTAssertFalse(inside.outside)
+        XCTAssertEqual(inside.point, CGPoint(x: 700, y: 400))
+        let right = PresenceGeometry.clamp(CGPoint(x: 4000, y: 400), into: display, inset: 36)
+        XCTAssertTrue(right.outside)
+        XCTAssertEqual(right.point, CGPoint(x: 1476, y: 400))
+    }
+
+    func testArcStartsAndEndsOnItsPoints() {
+        let a = CGPoint(x: 10, y: 20), b = CGPoint(x: 900, y: 500)
+        XCTAssertEqual(PresenceGeometry.arc(from: a, to: b, t: 0), a)
+        let end = PresenceGeometry.arc(from: a, to: b, t: 1)
+        XCTAssertEqual(end.x, b.x, accuracy: 1e-6)
+        XCTAssertEqual(end.y, b.y, accuracy: 1e-6)
+        // Bowed: the middle is off the straight line.
+        let mid = PresenceGeometry.arc(from: a, to: b, t: 0.5)
+        XCTAssertGreaterThan(hypot(mid.x - (a.x + b.x) / 2, mid.y - (a.y + b.y) / 2), 10)
+    }
+
+    func testFlightsAreQuick() {
+        XCTAssertEqual(PresenceGeometry.flightDuration(from: .zero, to: CGPoint(x: 1, y: 1)), 0)
+        XCTAssertEqual(PresenceGeometry.flightDuration(from: .zero, to: CGPoint(x: 40, y: 0)), 0.18, accuracy: 1e-9)
+        XCTAssertEqual(PresenceGeometry.flightDuration(from: .zero, to: CGPoint(x: 5000, y: 0)), 0.45, accuracy: 1e-9)
+        XCTAssertLessThanOrEqual(PresenceGeometry.typingDuration(500), 0.9)
+    }
+
+    /// The overlay's layers are y-up, from the display's bottom-left; global points are y-down.
+    func testLocalCoordinatesFlip() {
+        let display = CGRect(x: 1512, y: -200, width: 1920, height: 1080)
+        XCTAssertEqual(PresenceGeometry.local(CGPoint(x: 1512, y: -200), display: display), CGPoint(x: 0, y: 1080))
+        XCTAssertEqual(PresenceGeometry.local(CGRect(x: 1612, y: -100, width: 50, height: 20), display: display),
+                       CGRect(x: 100, y: 960, width: 50, height: 20))
+    }
+
+    func testPressesForActions() {
+        XCTAssertEqual(AppTools.press(for: "set_value", text: "hi"), .typed("hi"))
+        XCTAssertEqual(AppTools.press(for: "confirm", text: ""), .returnKey)
+        XCTAssertEqual(AppTools.press(for: "select", text: "Economy"), .chose("Economy"))
+        XCTAssertEqual(AppTools.press(for: "scroll_up", text: ""), .scrolled(down: false))
+        XCTAssertEqual(AppTools.press(for: "click", text: ""), .click)
+    }
+}

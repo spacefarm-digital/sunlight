@@ -402,6 +402,13 @@ final class CanvasController {
         NotificationCenter.default.addObserver(forName: Settings.magneticPolarityDidChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.polaritySettingChanged() }
         }
+        NotificationCenter.default.addObserver(forName: Settings.windowLabelsDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                for p in self.proxies.values { p.windowLabelsSettingChanged() }
+                for p in self.away.values { p.windowLabelsSettingChanged() }
+            }
+        }
         view.isPlacedBySetting = { p in p.kind == .widget }
         desktopFloor.onContentChanged = { [weak self] in self?.arrangeDesktop(animated: false) }
         desktopPlacementChanged(animated: false)
@@ -2491,7 +2498,7 @@ final class CanvasController {
                                   in snapshot: FrameSnapshot? = nil) -> WindowProxy? {
         var best: (proxy: WindowProxy, score: CGFloat)?
         for (index, q) in view.proxies.enumerated() where q.pid == pid && q.windowID != id && q.standsAlone && q.away == nil && !q.leaving {
-            let parent = snapshot?[q.windowID] ?? q.lastRealFrame
+            let parent = unscaledFrame(of: q, listed: snapshot?[q.windowID] ?? q.lastRealFrame)
             let shared = parent.intersection(native)
             guard !shared.isNull else { continue }
             let covered = shared.width * shared.height / max(native.width * native.height, 1)
@@ -2504,10 +2511,21 @@ final class CanvasController {
         return best?.proxy
     }
 
+    /// A window's frame as its app has it, for hanging a child from it. A window drawn scaled (in use at
+    /// any zoom, `Settings.useScaledWindows`) is listed by the window server through its transform, at the
+    /// size it's drawn, but its app places a menu or popup from its own unscaled frame (public issue #11:
+    /// Chrome's omnibar list, read against the scaled frame, hung from nothing and stood alone, up and to
+    /// the left of the omnibar). The listed frame is then smaller than the window is in world units, which
+    /// are points at 1:1; Accessibility has the frame the app means.
+    private func unscaledFrame(of q: WindowProxy, listed: CGRect) -> CGRect {
+        guard listed.width < q.worldRect.width - 2, let real = q.ax?.frame, real.width > listed.width else { return listed }
+        return real
+    }
+
     /// Hangs `child` from `parent` where the app put it: at its offset from the parent's native frame,
     /// which is where the parent is on the canvas plus that offset. From now it rides with the parent.
     private func attach(_ child: WindowProxy, to parent: WindowProxy, native: CGRect, parentNative: CGRect? = nil) {
-        let parentNative = parentNative ?? parent.lastRealFrame
+        let parentNative = unscaledFrame(of: parent, listed: parentNative ?? parent.lastRealFrame)
         child.attachedTo = parent.windowID
         child.attachmentOffset = CGPoint(x: native.minX - parentNative.minX, y: native.minY - parentNative.minY)
         child.place(at: CGPoint(x: parent.worldRect.minX + child.attachmentOffset.x, y: parent.worldRect.minY + child.attachmentOffset.y))
@@ -2558,8 +2576,10 @@ final class CanvasController {
         p.attachedChildren = []
         for c in children {
             c.attachedTo = nil
-            if let parent = attachmentParent(for: c.lastRealFrame, pid: c.pid, excluding: c.windowID) {
-                attach(c, to: parent, native: c.lastRealFrame)
+            // Drawn scaled with the window it hung from, it's measured unscaled, as its new parent is.
+            let native = unscaledFrame(of: c, listed: c.lastRealFrame)
+            if let parent = attachmentParent(for: native, pid: c.pid, excluding: c.windowID) {
+                attach(c, to: parent, native: native)
             } else {
                 NSLog("Attached: \(c.appName) — \(c.title) stands alone now that \(p.title) is gone")
             }
@@ -3795,6 +3815,17 @@ final class CanvasController {
 
     /// Holds the window: on the canvas, or away with its place kept.
     func agentHolds(_ id: CGWindowID) -> Bool { proxies[id] != nil || away[id] != nil }
+
+    /// Where a window of this canvas is drawn this frame, for Tell Sunlight's pointer (`AgentPresence`):
+    /// global points (top-left origin), the zoom it's drawn at, and its display's frame. Mid-glide and
+    /// mid-flight included, since the proxy and the camera move every frame. Nil for a window that's away
+    /// or not on this canvas.
+    func agentDrawn(_ id: CGWindowID) -> (rect: CGRect, zoom: CGFloat, display: CGRect)? {
+        guard let p = proxies[id] else { return nil }
+        let drawn = toGlobal(view.camera.toScreen(p.apparentRect))
+        // The window's own scale: the camera's, or a Picture in Picture tile's.
+        return (drawn, drawn.width / max(1, p.worldRect.width), display.frame)
+    }
 
     /// Why the canvas can't take a command now, if it can't: what the guards on its own commands check.
     var agentBusy: String? {

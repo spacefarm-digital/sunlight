@@ -378,6 +378,20 @@ enum AppReader {
         return Outcome(ok: true, message: "This field has no Return action, so a Return key was sent to the app with the field focused. Check that it took (the page or view should change); if not, use the app's Go, Search or Send button.")
     }
 
+    /// Where the element and its window are, global points (top-left origin), for Tell Sunlight's pointer
+    /// (`AgentPresence`). A few round trips to the app; an element that doesn't name its window gets
+    /// none (the pointer goes to the window's middle) rather than a search through the app's windows.
+    /// Blocking; call it through `off`.
+    static func frames(of handle: Handle) -> Frames {
+        let e = handle.element
+        return Frames(element: e.frame, window: e.element(kAXWindowAttribute)?.frame)
+    }
+
+    struct Frames: Sendable {
+        let element: CGRect?
+        let window: CGRect?
+    }
+
     /// Carries out `action` on the element. Blocking; call it through `off`.
     static func perform(_ action: String, on handle: Handle, text: String) -> Outcome {
         let e = handle.element

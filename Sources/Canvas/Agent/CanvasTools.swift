@@ -8,6 +8,8 @@ struct CanvasTools {
     let desk: Desk
     /// A layout was saved: the menus list it.
     var onLayoutsChanged: (() -> Void)?
+    /// Shows each command on screen: the pointer takes the window by its title bar and rides along.
+    var presence: AgentPresence?
 
     struct Outcome {
         /// What goes back to the model.
@@ -120,15 +122,18 @@ struct CanvasTools {
         if let busy = canvas.agentBusy { return fail("The canvas can't do that now: \(busy).") }
         let label = CanvasTools.label(window)
         await bringCanvasForward(canvas)
+        defer { presence?.release() }
 
         switch name {
         case "move_window":
             guard let x = CanvasTools.number(input["x"]), let y = CanvasTools.number(input["y"]) else { return fail("x and y are needed.") }
+            guard await show(.titleBar, on: id) else { return stopped }
             return await done(canvas.agentMove(id, to: CGPoint(x: x, y: y)), "Moved \(label)", id: id, on: canvas)
         case "resize_window":
             guard let w = CanvasTools.number(input["width"]), let h = CanvasTools.number(input["height"]), w >= 80, h >= 60 else {
                 return fail("width and height are needed, at least 80 × 60.")
             }
+            guard await show(.corner, on: id) else { return stopped }
             return await done(canvas.agentResize(id, to: CGSize(width: w, height: h)), "Resized \(label)", id: id, on: canvas)
         case "place_beside":
             guard let otherID = CanvasTools.windowID(input["next_to"]),
@@ -138,18 +143,24 @@ struct CanvasTools {
             guard otherID != id else { return fail("A window can't be placed beside itself.") }
             let side = input["side"] as? String ?? "right"
             let origin = CanvasTools.origin(of: window.rect.size, beside: other.rect, side: side)
+            guard await show(.titleBar, on: id) else { return stopped }
             return await done(canvas.agentMove(id, to: origin), "Put \(label) \(side == "left" || side == "right" ? "to the \(side) of" : side) \(CanvasTools.label(other))", id: id, on: canvas)
         case "tile_window":
             guard let preset = (input["slot"] as? String).flatMap(Tiling.Preset.init(rawValue:)) else { return fail("Unknown slot.") }
+            guard await show(.titleBar, on: id) else { return stopped }
             return await done(canvas.agentTile(id, preset), "Tiled \(label) to \(preset.title.lowercased())", id: id, on: canvas)
         case "enter_window":
-            return await done(canvas.agentEnter(id), "Went into \(label)", id: id, on: canvas)
+            guard await show(.center, on: id) else { return stopped }
+            return await done(pressed(canvas.agentEnter(id)), "Went into \(label)", id: id, on: canvas)
         case "minimize_window":
-            return await done(canvas.agentMinimize(id), "Minimized \(label)", id: id, on: canvas)
+            guard await show(.minimize, on: id) else { return stopped }
+            return await done(pressed(canvas.agentMinimize(id)), "Minimized \(label)", id: id, on: canvas)
         case "bring_back":
+            // The pointer has nothing to take hold of until the window is back on the canvas.
             return await done(canvas.agentBringBack(id), "Brought back \(label)", id: id, on: canvas)
         case "close_window":
-            return await done(canvas.agentClose(id), "Closed \(label)", id: id, on: canvas)
+            guard await show(.close, on: id) else { return stopped }
+            return await done(pressed(canvas.agentClose(id)), "Closed \(label)", id: id, on: canvas)
         default:
             return fail("There's no tool called \(name).")
         }
@@ -187,6 +198,8 @@ struct CanvasTools {
         guard let id = await canvas.agentOpen(app) else {
             return fail("\(app.name) opened but no window of it reached the canvas within a few seconds. It may need a moment, or have opened no window; call list_windows to check.")
         }
+        await presence?.grab(id, .titleBar)
+        presence?.release()
         var result: [String: Any] = ["window_id": Int(id), "app": app.name]
         if let w = canvas.agentWindows.first(where: { $0.id == id }) {
             result["title"] = w.title
@@ -196,6 +209,22 @@ struct CanvasTools {
     }
 
     // MARK: Pieces
+
+    /// Before a window command, the pointer goes where a hand would: the title bar to move or tile, the
+    /// corner to resize, the traffic lights to close or minimize, the middle to go in. False if the
+    /// request was stopped (Esc) while it flew: the command isn't given.
+    private func show(_ grip: AgentPresence.Grip, on id: CGWindowID) async -> Bool {
+        await presence?.grab(id, grip)
+        return !Task.isCancelled
+    }
+
+    /// A button-like command (close, minimize, go in) shows its press once it's been given.
+    private func pressed(_ succeeded: Bool) -> Bool {
+        presence?.pressed(succeeded ? .click : .failed)
+        return succeeded
+    }
+
+    private var stopped: Outcome { fail("Stopped.") }
 
     /// The canvas's commands are given on the canvas: from inside a window, or with another app in front,
     /// it comes forward first, as the menu bar's commands do.

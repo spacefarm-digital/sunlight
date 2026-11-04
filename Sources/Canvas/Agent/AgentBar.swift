@@ -22,12 +22,18 @@ final class AgentBar: NSPanel, NSTextFieldDelegate {
     private var log: NSHostingView<AgentBarLog>!
     private var run: AgentRun?
     private var hideTimer: Timer?
+    /// What a request does, shown on screen: its own pointer, ripples, the glow.
+    private let presence: AgentPresence
 
     override var canBecomeKey: Bool { true }
 
     init(desk: Desk, onLayoutsChanged: (() -> Void)?) {
         self.desk = desk
-        tools = CanvasTools(desk: desk, onLayoutsChanged: onLayoutsChanged)
+        let presence = AgentPresence(desk: desk)
+        var tools = CanvasTools(desk: desk, onLayoutsChanged: onLayoutsChanged)
+        tools.presence = presence
+        self.tools = tools
+        self.presence = presence
         let size = NSSize(width: AgentBar.width, height: AgentBar.fieldHeight)
         super.init(contentRect: NSRect(origin: .zero, size: size),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -85,6 +91,7 @@ final class AgentBar: NSPanel, NSTextFieldDelegate {
     func shutDown() {
         answerConfirmation(false)
         run?.stop()
+        presence.end()
         dismiss()
     }
 
@@ -134,6 +141,7 @@ final class AgentBar: NSPanel, NSTextFieldDelegate {
         }
         model.begin(request: text)
         let apps = AppTools(desk: desk)
+        apps.presence = presence
         apps.confirm = { [weak self] question in await self?.ask(question) ?? false }
         apps.onWindow = { [weak self] line in
             self?.model.steps.append(line)
@@ -149,11 +157,14 @@ final class AgentBar: NSPanel, NSTextFieldDelegate {
             self.model.state = state
             self.layoutForContent()
             if case .working = state { return }
+            self.presence.end()
             // Finished behind a window it went into: the bar steps aside after a moment.
             if !self.isKeyWindow { self.dismissSoon() }
         }
         self.run = run
         layoutForContent()
+        // The pointer sets off from under the bar.
+        presence.begin(home: AgentPresence.global(bottomCenterOf: frame))
         run.start()
     }
 

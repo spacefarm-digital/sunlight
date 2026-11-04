@@ -19,10 +19,13 @@ final class WindowListTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 200, height: 120), styleMask: [.titled],
                               backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        // No order-out fade: the window stays on screen through AppKit's fade (~250 ms measured with the
+        // display awake), which can outlast the wait below; without it the window leaves in ~5 ms.
+        window.animationBehavior = .none
         window.orderFrontRegardless()
         let id = CGWindowID(window.windowNumber)
         XCTAssertTrue(WindowList.exists(id))
-        // The window server shows (and hides) the window once the run loop has spun; ~25 ms measured.
+        // The window server shows (and hides) the window once the run loop has spun; ~5–30 ms measured.
         XCTAssertTrue(settles(id, onScreen: true), "ordered front, the window comes on screen")
         window.orderOut(nil)
         XCTAssertTrue(WindowList.exists(id), "ordered out, the window still exists")

@@ -15,6 +15,8 @@ final class AppTools {
     var confirm: ((String) async -> Bool)?
     /// "Working in Slack", for the bar, as the work moves to a window.
     var onWindow: ((String) -> Void)?
+    /// Shows each step on screen (its own pointer, a ripple on a press); nil or off, nothing is drawn.
+    var presence: AgentPresence?
 
     /// The snapshots taken this request: which window each was of, and its elements by ref.
     private struct Snapshot {
@@ -77,6 +79,7 @@ final class AppTools {
         guard let window = window(input["window_id"]) else { return Self.fail("No window has that id. Call list_windows.") }
         if let refused = refusal(for: window) { return Self.fail(refused) }
         working(in: window)
+        presence?.reading(window.id)
         let rootRef = (input["root_ref"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         var root: AppReader.Handle?
         if !rootRef.isEmpty {
@@ -107,6 +110,7 @@ final class AppTools {
         guard let window = window(input["window_id"]) else { return Self.fail("No window has that id. Call list_windows.") }
         if let refused = refusal(for: window) { return Self.fail(refused) }
         working(in: window)
+        presence?.reading(window.id)
         guard let read = await Self.read(window, under: nil, maxNodes: 4000) else {
             return Self.fail("\(window.app)'s window isn't answering accessibility right now. Try again.")
         }
@@ -129,6 +133,7 @@ final class AppTools {
         if element.target.secure && (property == "text" || property == "value") {
             return Self.fail("That's a password field; Sunlight never reads one.")
         }
+        presence?.reading(snap.window.id)
         guard let read = await Self.read(snap.window, under: element.handle, maxNodes: property == "text" ? 6000 : 60, deadline: 6) else {
             return Self.fail("The app didn't answer. Try again.")
         }
@@ -194,17 +199,25 @@ final class AppTools {
         }
         let target = element.target
         let label = target.name.isEmpty ? target.role : "“\(Self.short(target.name))”"
+        let handle = element.handle
+        // The pointer goes to the control first, so a question in the bar points at something on screen.
+        // Stopped while it flew (Esc), nothing more happens.
+        await point(at: handle, in: snap.window, for: action)
+        if Task.isCancelled { return Self.fail("Stopped.") }
         if Guardrails.needsConfirmation(action: action, name: target.name, option: text, role: target.role) {
             let question = action == "select" ? "Choose “\(Self.short(text))” in \(snap.window.app)?"
                 : action == "confirm" ? "Press Return in \(label) in \(snap.window.app)?"
                 : "\(action.capitalized) \(label) in \(snap.window.app)?"
-            guard let confirm, await confirm(question) else {
+            presence?.asking()
+            let allowed = await confirm?(question) ?? false
+            presence?.asked(allowed: allowed)
+            guard allowed else {
                 return Self.fail("The user didn't allow this step, so it wasn't done. Don't try it another way; say in your answer that it's left for them.")
             }
         }
         working(in: snap.window)
-        let handle = element.handle
         let outcome = await AppReader.off { AppReader.perform(action, on: handle, text: text) }
+        presence?.pressed(outcome.ok ? Self.press(for: action, text: text) : .failed)
         NSLog("Tell Sunlight: \(action) on \(target.role) in \(snap.window.app) → \(outcome.ok ? "ok" : outcome.message)")
         let step: String
         switch action {
@@ -216,6 +229,34 @@ final class AppTools {
         default: step = "\(action.capitalized) \(label) in \(snap.window.app)"
         }
         return CanvasTools.Outcome(result: outcome.message, isError: !outcome.ok, step: outcome.ok ? step : nil)
+    }
+
+    // MARK: Showing it
+
+    /// Tell Sunlight's pointer to the element, which it outlines; back once the pointer has landed.
+    private func point(at handle: AppReader.Handle, in window: CanvasController.AgentWindow, for action: String) async {
+        guard let presence, presence.active else { return }
+        let frames = await AppReader.off { AppReader.frames(of: handle) }
+        let badge: AgentPresence.Badge = switch action {
+        case "set_value", "type", "clear": .typing
+        case "scroll_down": .scrollDown
+        case "scroll_up": .scrollUp
+        default: .none
+        }
+        await presence.target(window.id, unit: PresenceGeometry.unit(of: frames.element, in: frames.window), badge: badge)
+    }
+
+    /// How an action that worked shows once the pointer is on the control.
+    static func press(for action: String, text: String) -> AgentPresence.Press {
+        switch action {
+        case "set_value", "type": .typed(text)
+        case "clear": .typed("⌫")
+        case "confirm": .returnKey
+        case "select": .chose(text)
+        case "scroll_down": .scrolled(down: true)
+        case "scroll_up": .scrolled(down: false)
+        default: .click
+        }
     }
 
     // MARK: Pieces
@@ -240,6 +281,7 @@ final class AppTools {
     }
 
     private func working(in window: CanvasController.AgentWindow) {
+        presence?.workingIn(window.id)
         guard lastWindow != window.id else { return }
         lastWindow = window.id
         onWindow?("Working in \(CanvasTools.label(window))")

@@ -361,6 +361,30 @@ enum Settings {
         set { UserDefaults.standard.set(newValue, forKey: minimapKey) }
     }
 
+    // MARK: Window names
+
+    private static let windowLabelsKey = "WindowLabels"
+    private static var windowLabelsCache: Bool?
+
+    /// Whether each window's name is shown above it on the canvas, zoomed out. On until it's turned
+    /// off. Read on every zoom step for every window in view, so it's kept in memory after the first read.
+    static var showWindowLabels: Bool {
+        get {
+            if let cached = windowLabelsCache { return cached }
+            let on = UserDefaults.standard.object(forKey: windowLabelsKey) == nil || UserDefaults.standard.bool(forKey: windowLabelsKey)
+            windowLabelsCache = on
+            return on
+        }
+        set {
+            windowLabelsCache = newValue
+            UserDefaults.standard.set(newValue, forKey: windowLabelsKey)
+            NotificationCenter.default.post(name: windowLabelsDidChange, object: nil)
+        }
+    }
+
+    /// Posted when Settings › Canvas › Window names is switched: the canvas shows or hides the labels.
+    static let windowLabelsDidChange = Notification.Name("CanvasWindowLabelsDidChange")
+
     // MARK: The desktop
 
     private static let desktopFloorKey = "DesktopFloor"
@@ -485,6 +509,16 @@ enum Settings {
             defaults.set(newValue, forKey: tellSunlightKey)
             NotificationCenter.default.post(name: experimentalFeaturesDidChange, object: nil)
         }
+    }
+
+    private static let tellSunlightPresenceKey = "TellSunlightPresence"
+
+    /// Tell Sunlight shows what it does: its own pointer moving to each control it presses, a ripple on
+    /// the press, a glow along the screen edges while a request runs (`AgentPresence`). On unless turned
+    /// off; the user's own pointer is never moved either way.
+    static var tellSunlightPresence: Bool {
+        get { defaults.object(forKey: tellSunlightPresenceKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: tellSunlightPresenceKey) }
     }
 
     /// A flag above changed: the menus, the hotkeys and the menu bar panel follow.
@@ -1021,6 +1055,11 @@ final class SettingsModel: ObservableObject {
         Settings.showMinimap = on
     }
 
+    func setWindowLabels(_ on: Bool) {
+        objectWillChange.send()
+        Settings.showWindowLabels = on
+    }
+
     func setDesktopFiles(_ on: Bool) {
         objectWillChange.send()
         onDesktopFilesChange?(on)
@@ -1247,6 +1286,10 @@ private struct CanvasPane: View {
                     RowLabel(title: "Minimap",
                              subtitle: "A map of the canvas in the corner.")
                 }
+                Toggle(isOn: model.bind({ Settings.showWindowLabels }, { model.setWindowLabels($0) })) {
+                    RowLabel(title: "Window names",
+                             subtitle: "Each window’s name above it, zoomed out.")
+                }
                 Toggle(isOn: model.bind({ Settings.showDesktopFloor }, { model.setDesktopFiles($0) })) {
                     RowLabel(title: "Desktop files",
                              subtitle: "Your desktop files, under the windows.")
@@ -1286,6 +1329,7 @@ private struct CanvasPane: View {
         parts.append(Settings.switcherOn ? "⌘Tab strip on the \(Settings.switcherEdge.title.lowercased())." : "No ⌘Tab strip.")
         parts.append(Settings.showMinimap ? "Minimap on." : "No minimap.")
         if Settings.showDesktopFloor { parts.append("Desktop files on.") }
+        if !Settings.showWindowLabels { parts.append("No window names.") }
         return parts.joined(separator: " ")
     }
 }
@@ -1883,6 +1927,10 @@ private struct ExperimentalPane: View {
                         info: "Each request sends what you typed and your window list (app names, titles, positions) to Anthropic’s API with your key, plus the text of a window it works inside. Nothing is sent until you press ⏎. Sending, deleting, paying or publishing waits for your Allow. Settings, passwords and terminal apps are never worked inside. The key stays in your keychain.",
                         on: model.bind({ Settings.tellSunlight }, { Settings.tellSunlight = $0 })) {
                     AgentKeyRow()
+                    Toggle(isOn: model.bind({ Settings.tellSunlightPresence }, { Settings.tellSunlightPresence = $0 })) {
+                        RowLabel(title: "Show what it’s doing",
+                                 subtitle: "Its own pointer moves to each button it presses. Yours stays yours.")
+                    }
                 }
             } header: {
                 SectionHeader(title: "Experimental",

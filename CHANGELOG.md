@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Tell Sunlight shows what it's doing with its own pointer: a yellow pointer with a Sunlight tag glides to each control before pressing it, outlines it and ripples on the press, shows text as it's typed, scans a window as it reads it and outlines the window it's working in, and the screen edges glow while a request runs. It follows the window as it moves, the canvas pans and you zoom, and waits at the screen edge pointing at a window out of view. Your own pointer and keyboard are never touched, and esc still stops it mid-move. Settings > Experimental > Tell Sunlight > Show what it's doing (on by default).
+- Settings > Canvas has a Window names switch: turn it off and no window shows its name above it on the canvas, at any zoom.
+- The four-finger tap opens See All on the display under the pointer, even when you're in a window on another display (#6).
+- With Use windows at any zoom, menus and popups such as Chrome's omnibar list hang from their window instead of standing alone on the canvas up and to the left of it (#11).
+
 ## 0.2.1
 
 - Live windows start on macOS 15 again: the Dock add-on is now installed with the Dock's own arm64e ABI, which newer Xcode versions build differently, and an add-on that no longer matches (after a macOS update, say) is reinstalled when it loads. Found by Alvaro Almeida (#2).

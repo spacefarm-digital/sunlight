@@ -214,7 +214,14 @@ final class Desk {
             panning = nil
         case .seeAll:
             // By Settings › How to use, a flick up can end a drag mid-way: that canvas gets it.
-            (panning ?? current).trackpadPan(phase)
+            if let panning {
+                panning.trackpadPan(phase)
+            } else {
+                // A tap is the display under the pointer's, not the one a window is entered on (public
+                // issue #6). That one leaves its window by itself as Sunlight comes forward
+                // (`returnedToCanvas`, on every canvas), and stays behind the one tapped on.
+                pointed.trackpadPan(phase)
+            }
             panning = nil
         case .spread:
             current.trackpadPan(phase)
