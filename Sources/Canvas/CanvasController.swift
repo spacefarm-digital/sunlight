@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 /// `NSApplication.activate()` is refused.
 @_silgen_name("SetFrontProcessWithOptions")
 private func SetFrontProcessWithOptions(_ psn: UnsafePointer<ProcessSerialNumber>, _ options: UInt32) -> OSStatus
+@_silgen_name("GetProcessForPID")
+private func GetProcessForPID(_ pid: pid_t, _ psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
 private let kCurrentProcessPSN: UInt32 = 2          // kCurrentProcess
 private let kFrontWindowOnly: UInt32 = 1 << 0       // kSetFrontProcessFrontWindowOnly
 
@@ -15,6 +17,16 @@ private let kFrontWindowOnly: UInt32 = 1 << 0       // kSetFrontProcessFrontWind
 @discardableResult
 func forceSunlightFront() -> OSStatus {
     var psn = ProcessSerialNumber(highLongOfPSN: 0, lowLongOfPSN: kCurrentProcessPSN)
+    return SetFrontProcessWithOptions(&psn, kFrontWindowOnly)
+}
+
+/// Another app to the front the same way (`forceSunlightFront`), for when cooperative activation
+/// refuses the request: Sunlight asking from behind another app (a window entered by ⌘Tab while one
+/// was in use where it's drawn) isn't the front app yielding, and the plain request may be declined.
+func forceAppFront(_ pid: pid_t) -> OSStatus {
+    var psn = ProcessSerialNumber(highLongOfPSN: 0, lowLongOfPSN: 0)
+    let err = GetProcessForPID(pid, &psn)
+    guard err == noErr else { return err }
     return SetFrontProcessWithOptions(&psn, kFrontWindowOnly)
 }
 
@@ -450,6 +462,7 @@ final class CanvasController {
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
                                                object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.wantsFrontUntil = 0   // it has the front
                 // Back from a window used where it's drawn: the next app activated is the user's again.
                 self?.usedScaledPIDs = []
                 self?.hoverFocusedID = nil
@@ -465,6 +478,7 @@ final class CanvasController {
                                                object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.reassertFrontIfTakenBack()
                 // A window entered on another display: this one's canvas stays up as it is.
                 if !self.staysUp {
                     // The front app as the workspace has it. At this moment it can still be this app (the
@@ -1231,6 +1245,10 @@ final class CanvasController {
 
     func show() {
         guard !paused else { return }   // off in the menu bar; the switch brings it back
+        // The canvas wants the front from now (`frontTakenBack`); a show on top of one still on its way
+        // doesn't extend the wish, so an app that keeps taking the front can't be fought for ever.
+        let now = CACurrentMediaTime()
+        if now >= wantsFrontUntil { wantsFrontUntil = now + CanvasController.wantsFrontFor }
         // Live mode, from an entered window: its active shadow look (the one shown while it is key) is
         // eased back to the inactive one first, over a few frames, so the window server's switch as the
         // canvas takes the screen changes nothing (see `shadowFlight`). A click on the canvas activates us
@@ -1267,12 +1285,53 @@ final class CanvasController {
         // ordering the window front covers the screen even before activation lands. Right after a
         // handoff `isActive` still reads true while the other app's activation is landing, so an
         // entered window counts as "not in front" too.
-        if !NSApp.isActive || activeProxy != nil { forceFront() }
+        // The workspace's front app likewise: it can be another app while this one still reads as
+        // active (its deactivation on the way: an app clicked in the Dock reported by the workspace
+        // first), and an activation asked for then changed nothing.
+        if !NSApp.isActive || activeProxy != nil || NSWorkspace.shared.frontmostApplication?.processIdentifier != myPID { forceFront() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self, !NSApp.isActive else { return }
             NSLog("Sunlight: still not active 300 ms after show()")
-            // ⌘Tab is waiting on the canvas; don't leave the user stranded in the window.
-            if self.switcher != nil { self.forceFront() }
+            // ⌘Tab is waiting on the canvas, or an app on its way took the front back; don't leave the
+            // user stranded in the window.
+            if self.switcher != nil || self.frontTakenBack() { self.forceFront() }
+        }
+    }
+
+    /// Until when the canvas wants the front, from the last `show`: the user asked for the canvas, or
+    /// it is on its way over to a window (`slide`). Cleared as it arrives, and whenever it yields on
+    /// purpose (`enter`, a window used where it's drawn, an app the user went to instead).
+    private var wantsFrontUntil: CFTimeInterval = 0
+    static let wantsFrontFor: CFTimeInterval = 1.5
+
+    /// Whether an app took the front back from the canvas on its way forward (`show`), so it never came:
+    /// the one the user was in, whose activation from the handoff landed after the canvas was asked
+    /// back (⌘Tab or the Mission Control key right after entering a window: the canvas came forward,
+    /// read as active still, and the app's activation then landed over it), or the one the canvas is
+    /// going over to, whose Dock-click activation the workspace reported before AppKit deactivated
+    /// Sunlight, so `show` found it active and asked for nothing. ⌘Tab's pick, a pan, Show Desktop
+    /// or the placement then waited for a canvas that wasn't coming. Only those two apps: any other
+    /// in front is the user's own doing (a click, a Dock click meanwhile), answered by `foreignActivation`.
+    private func frontTakenBack() -> Bool {
+        guard !NSApp.isActive, CACurrentMediaTime() < wantsFrontUntil,
+              let front = NSWorkspace.shared.frontmostApplication, front.activationPolicy == .regular else { return false }
+        let pid = front.processIdentifier
+        guard pid != myPID else { return false }
+        return pid == activeProxy?.pid || pid == expectedActivationPID || pid == slidingIn?.pid
+    }
+
+    /// A moment after the canvas lost the front while it wanted it (`didResignActive`): back, if the app
+    /// that took it is one of the two above. A moment, not at once: the activation that took the front
+    /// is reported just after, and `foreignActivation` is the one to answer a user's.
+    private func reassertFrontIfTakenBack() {
+        guard frontTakenBack() else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.frontTakenBack() else { return }
+                let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+                NSLog("Sunlight: \(front) took the front back while the canvas was on its way — coming back")
+                self.show()
+            }
         }
     }
 
@@ -2948,7 +3007,23 @@ final class CanvasController {
         view.add(p, arriving: arriving)
         if let was { NSLog("Away: \(p.appName) — \(p.title) back from \(was)") }
         showAway()
+        if revealOnReturn == id {
+            revealOnReturn = nil
+            reveal(p)
+        }
         return p
+    }
+
+    /// The camera over to a window put back on the canvas whose place isn't in view: it was brought back
+    /// for a click (the Dock), and nothing showed for it. The zoom stays; in view already, nothing moves.
+    private func reveal(_ p: WindowProxy) {
+        guard NSApp.isActive, activeProxy == nil, !handingOff else { return }
+        let visible = view.camera.toWorld(visibleTopLeft)
+        let shown = visible.intersection(p.worldRect)
+        let mostlyIn = !shown.isNull && shown.width * shown.height >= p.worldRect.width * p.worldRect.height / 2
+        guard !mostlyIn else { return }
+        NSLog("Away: \(p.appName) — \(p.title) is back out of view — over to it")
+        view.fly(to: camera(centring: CGPoint(x: p.worldRect.midX, y: p.worldRect.midY)))
     }
 
     /// Every window away, looked at again: closed meanwhile (or its app quit), or its app hidden or shown.
@@ -5321,6 +5396,7 @@ final class CanvasController {
         for q in proxies.values where q.pid == p.pid { q.revealed = true }
         stopStreams(of: p.pid)
 
+        wantsFrontUntil = 0   // the canvas yields on purpose: nothing brings it back but the user
         if activateApp {
             if renderer != .realWindows { p.ax?.raise(); raiseAttachedChildren(of: p) }   // live: raised when the handoff began
             if let app = NSRunningApplication(processIdentifier: p.pid) {
@@ -5328,7 +5404,10 @@ final class CanvasController {
                 // Cooperative activation: we're frontmost, so we're allowed to yield to the target app.
                 let yielded = app.activate(from: .current, options: [])
                 let forced = yielded ? true : app.activate(options: [])
-                NSLog("Handoff: activate \(p.appName) — yielded \(yielded), fallback \(forced), we were active: \(NSApp.isActive)")
+                // Neither taken (Sunlight isn't the front app, so it has nothing to yield: a window
+                // entered by ⌘Tab while another was in use where it's drawn): the way that can't be refused.
+                let carbon = forced ? noErr : forceAppFront(p.pid)
+                NSLog("Handoff: activate \(p.appName) — yielded \(yielded), fallback \(forced)\(forced ? "" : ", SetFrontProcess \(carbon == noErr ? "ok" : "failed (\(carbon))")"), we were active: \(NSApp.isActive)")
             }
         }
 
@@ -5373,7 +5452,7 @@ final class CanvasController {
             if NSApp.isActive, let p = self.activeProxy, p.pid == pid {
                 if attempt == 0, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
                     NSLog("Handoff: \(p.appName) hasn't come to the front — asking once more")
-                    _ = app.activate(options: [])
+                    if !app.activate(options: []) { _ = forceAppFront(pid) }
                     self.expectActivation(of: pid, attempt: 1)
                     return
                 }
@@ -6358,7 +6437,8 @@ final class CanvasController {
         guard addingWidgets == nil, !isSetupShowing else { return }
         // A window just closed from the canvas: its app (or the next one macOS picks) coming forward isn't
         // the user going anywhere; the canvas stays as it was, camera and all.
-        if activeProxy == nil, Date() < quietAfterCloseUntil {
+        // Not with the pointer on the Dock: that's the user clicking an app there, close or no close.
+        if activeProxy == nil, Date() < quietAfterCloseUntil, !WindowList.pointerOverDock() {
             NSLog("Close: \(app.localizedName ?? "pid \(pid)") came forward after the close — the canvas stays")
             show()
             return
@@ -6389,6 +6469,7 @@ final class CanvasController {
         // click went nowhere; so did one with the pointer still taken for the window behind the Dock.)
         if activeProxy == nil, isScaledUseActivation(pid) {
             usedScaledPIDs.insert(pid)
+            wantsFrontUntil = 0   // the canvas stays up behind the app, by design; nothing brings it forward
             NSLog("Scaled use: \(app.localizedName ?? "pid \(pid)") came forward from its window on the canvas — the canvas stays")
             reassertCanvasOver(usedScaledApp: pid)
             return
@@ -6398,6 +6479,10 @@ final class CanvasController {
         let onCanvas = activeProxy == nil   // before `leaveEntered` clears it
         view.cancelAnimation()   // also clears `handingOff`, so a stale handoff can't land later
         closeSwitcher(clearHighlight: true)
+        // The user went to this app: whatever was waiting for the canvas to come forward (a pan, Show
+        // Desktop, See All, a placement, the wish for the front itself) is off, or it would bring the
+        // canvas back over the app the moment it was in front.
+        dropPendingCanvasWork()
         leaveEntered(reconcile: true)
         // The app's focused window, asked off the main thread: an app slow to answer Accessibility
         // (one still launching, one that is busy) held up the canvas here. What comes back is used only
@@ -6418,6 +6503,15 @@ final class CanvasController {
 
     private var foreignGeneration = 0
 
+    /// Everything waiting on the canvas coming forward, dropped: the user is going somewhere else.
+    private func dropPendingCanvasWork() {
+        wantsFrontUntil = 0
+        pendingPan = nil
+        pendingShowDesktop = false
+        pendingFitAll = false
+        pendingPlacement = nil
+    }
+
     /// From the canvas, an app whose focused window the canvas doesn't know is a launch (or a running
     /// app's new window): it stays on the canvas. One it knows is entered where it is. From inside a
     /// window, the new window is entered either way, at 1:1 — that is the current scale there.
@@ -6434,16 +6528,44 @@ final class CanvasController {
             stepDownForForeignApp()
             return
         }
+        // Accessibility names no window the canvas can go to — none at all (an app busy or slow to answer:
+        // an Electron app takes seconds; one whose focus sits on a panel), or one that could never be on
+        // the canvas — though the app has a window the canvas knows in front on the screen: the window
+        // server's word is taken instead. The Dock click (⌘Tab, Spotlight) brought the app's windows
+        // forward, and the frontmost one of them is the one to go to. Taken for a launch, as it was,
+        // the canvas came straight back and the camera never moved; waited on, nothing moved for as
+        // long as the app kept quiet.
+        if !focusedNamesCanvasWindow(focused), let found = frontKnownWindow(of: pid) {
+            NSLog("Absorb: \(app.localizedName ?? "pid \(pid)") names no focused window the canvas can use; \(found.proxy.appName) — \(found.proxy.title) is in front on screen — taking the window server's word")
+            if found.proxy.pip != nil {
+                NSLog("Absorb: \(found.proxy.appName) — \(found.proxy.title) is in Picture in Picture; used at its tile")
+                stepDownForForeignApp()
+                return
+            }
+            if found.canvas !== self {
+                clearPending()
+                found.canvas.absorbKnown(found.proxy, ax: found.proxy.ax, real: found.info.bounds)
+            } else {
+                absorbKnown(found.proxy, ax: found.proxy.ax, real: found.info.bounds)
+            }
+            return
+        }
         stepDownForForeignApp()
         // From the canvas, a window taken out of the Dock (its tile clicked, the app's icon) goes back to
         // its place on the canvas, as on any Mac it goes back where it was: the canvas comes straight
         // back, the listing finds the window on screen and puts its proxy back, and the frame scales it
-        // in. From inside a window it is entered, as any window brought to the front from there is.
+        // in, brought into view if its place isn't (`revealOnReturn`). From inside a window it is
+        // entered, as any window brought to the front from there is.
         // The app's focused window may not be readable yet while the Dock is still animating the window
-        // out (it is off the screen until then), so a minimized window of the app's counts too.
-        if onCanvas, let p = focused?.windowID.flatMap({ away[$0] }) ?? away.values.first(where: { $0.pid == pid && $0.away == .minimized }),
+        // out (it is off the screen until then), so with none named a minimized window of the app's
+        // counts too — only with none named: an app with a window on the canvas and another in the
+        // Dock, its icon clicked, named the one on the canvas, and was sent back to its place instead
+        // of entered.
+        if onCanvas, let p = focused?.windowID.flatMap({ away[$0] })
+            ?? (focused == nil ? away.values.first(where: { $0.pid == pid && $0.away == .minimized }) : nil),
            p.away == .minimized {
             NSLog("Away: \(p.appName) — \(p.title) restored from the Dock; back to its place on the canvas")
+            revealOnReturn = p.windowID
             show()
             return
         }
@@ -6478,6 +6600,36 @@ final class CanvasController {
         liftWindows(of: pid)
         return false
     }
+
+    /// Whether the window Accessibility names as focused is one the canvas can go to: one it knows (on
+    /// any display, in view or away), or one it has never seen that isn't on the screen yet (a new
+    /// window on its way) or is and could be on the canvas. A panel, an overlay or an invisible window
+    /// named as focused isn't, nor is no window at all.
+    private func focusedNamesCanvasWindow(_ focused: AXWindow?) -> Bool {
+        guard let id = focused?.windowID else { return false }
+        if lookup(id) != nil { return true }
+        // Not on the screen yet, or there but still invisible (Chrome shows a new window at alpha 0 for
+        // a few frames): a window on its way, waited for as before.
+        guard let w = WindowList.onScreen(id), w.alpha > 0 else { return true }
+        return isCanvasMaterial(w) || isWidget(w)
+    }
+
+    /// The app's frontmost window on the screen that some canvas knows (on it, or away from it and
+    /// back on the screen), in the window server's front-to-back order: after a Dock click or ⌘Tab
+    /// that is the window the activation brought forward, whatever Accessibility says.
+    /// At whatever level the window is just then: the normal one, or one of the canvas's own (the
+    /// listing made as the app's windows were lifted over the canvas, sunlight-27).
+    private func frontKnownWindow(of pid: pid_t) -> (canvas: CanvasController, proxy: WindowProxy, info: WindowInfo)? {
+        for w in WindowList.onScreen() where w.pid == pid && w.alpha > 0 {
+            if let found = lookup(w.id), found.proxy.kind == .window { return (found.canvas, found.proxy, w) }
+        }
+        return nil
+    }
+
+    /// A window put back onto the canvas from the Dock (`absorbForeign`), to bring into view as the
+    /// listing puts it back (`comeBack`) if its place on the canvas isn't: restored to a place off the
+    /// edge of the screen, nothing showed for the click.
+    private var revealOnReturn: CGWindowID?
 
     /// The app is in front but has nothing we can show yet; absorb it as soon as it opens a window.
     /// Never steal activation back here: the user is meant to end up in that window, and one created
@@ -6547,7 +6699,17 @@ final class CanvasController {
                     guard let self else { return }
                     self.pendingAsking = false
                     guard self.pendingAbsorbPID == pid, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
-                    if let focused { self.absorb(window: focused, read: read) } else { self.takeListedWindow(of: pid) }
+                    if let focused {
+                        self.absorb(window: focused, read: read)
+                    } else if let found = self.frontKnownWindow(of: pid), found.proxy.pip == nil {
+                        // Accessibility still names nothing, and a window the canvas knows is in front on
+                        // the screen (one that came up after the activation): the window server's word.
+                        NSLog("Absorb: pid \(pid) still names no focused window; \(found.proxy.appName) — \(found.proxy.title) is in front on screen — taking the window server's word")
+                        self.clearPending()
+                        found.canvas.absorbKnown(found.proxy, ax: found.proxy.ax, real: found.info.bounds)
+                    } else {
+                        self.takeListedWindow(of: pid)
+                    }
                 }
             }
         }
@@ -6602,29 +6764,8 @@ final class CanvasController {
             other.absorb(window: ax, read: AXReading(frame: real, fullScreen: false))
             return
         }
+        if let p = proxyReturning(id) { return absorbKnown(p, ax: ax, real: real) }
         stepDownForForeignApp()
-        if let p = proxyReturning(id) {
-            if placeInFront(p, real: real, near: lastInView) { return clearPending() }
-            // Brought to the front by name (Spotlight, the Dock) on the live canvas, natively somewhere
-            // other than where the canvas has it: windows were never moved natively while on the canvas,
-            // so several of them sat stacked where macOS last had them, and entering one there stacked
-            // the real ones the same way. Its place on the canvas is the truth: the canvas goes over to
-            // it there, the window drawn at its place all the way (`known`), as it was before the click.
-            // Likewise one that is where the canvas has it but mostly off the screen (the canvas has it
-            // a screen away from the window the user was in): entered where it is, it stayed off the screen.
-            let screen = toGlobal(visibleTopLeft)
-            let shown = screen.intersection(real)
-            let mostlyOff = shown.isNull || shown.width * shown.height < real.width * real.height / 2
-            if renderer == .realWindows, placesNewWindows, p.standsAlone, p.kind == .window, !sitsWhereCanvasHasIt(p, real: real) || mostlyOff {
-                NSLog("Absorb: \(p.appName) — \(p.title) came up at \(real.integral.origin), \(mostlyOff ? "mostly off the screen" : "not where the canvas has it") — over to it")
-                p.ax = ax
-                p.owner = .canvas
-                clearPending()
-                return slide(into: p, onScreen: false, known: true)
-            }
-            adopt(p, ax: ax, real: real)
-            return
-        }
         // A window we've never seen, opened from inside a window (from the canvas it would have been
         // kept there, see `keepOnCanvas`): snap to 1:1 around where the user was looking and put the new
         // proxy under the real window there.
@@ -6645,6 +6786,52 @@ final class CanvasController {
         }
     }
 
+    /// A window the canvas knows (one it shows, or one away and back on the screen), in front at `real`:
+    /// entered where it is, or gone over to. `ax` is the app's handle for it where Accessibility gave
+    /// one; the window server's frame stands in for the app's word where it gave none (`frontKnownWindow`),
+    /// and the handle is found off the main thread for what later needs it (`fetchHandle`).
+    private func absorbKnown(_ p: WindowProxy, ax: AXWindow?, real: CGRect) {
+        let p = proxyReturning(p.windowID) ?? p   // one away (hidden, minimized) is back on the canvas first
+        stepDownForForeignApp()
+        if placeInFront(p, real: real, near: lastInView) { return clearPending() }
+        // Brought to the front by name (Spotlight, the Dock) on the live canvas, natively somewhere
+        // other than where the canvas has it: windows were never moved natively while on the canvas,
+        // so several of them sat stacked where macOS last had them, and entering one there stacked
+        // the real ones the same way. Its place on the canvas is the truth: the canvas goes over to
+        // it there, the window drawn at its place all the way (`known`), as it was before the click.
+        // Likewise one that is where the canvas has it but mostly off the screen (the canvas has it
+        // a screen away from the window the user was in): entered where it is, it stayed off the screen.
+        let screen = toGlobal(visibleTopLeft)
+        let shown = screen.intersection(real)
+        let mostlyOff = shown.isNull || shown.width * shown.height < real.width * real.height / 2
+        if renderer == .realWindows, placesNewWindows, p.standsAlone, p.kind == .window, !sitsWhereCanvasHasIt(p, real: real) || mostlyOff {
+            NSLog("Absorb: \(p.appName) — \(p.title) came up at \(real.integral.origin), \(mostlyOff ? "mostly off the screen" : "not where the canvas has it") — over to it")
+            if let ax { p.ax = ax }
+            p.owner = .canvas
+            clearPending()
+            return slide(into: p, onScreen: false, known: true)
+        }
+        adopt(p, ax: ax, real: real)
+    }
+
+    /// The app's handle for an entered window taken in on the window server's word alone, found off the
+    /// main thread (the app was slow to answer; it may answer by now) and kept for what needs it: the
+    /// watch on its closing, a raise. Nothing waits for it.
+    private func fetchHandle(for p: WindowProxy) {
+        guard p.ax == nil else { return }
+        let id = p.windowID, pid = p.pid, approx = p.lastRealFrame
+        AXQueue.interactive.async { [weak self] in
+            guard let ax = AXWindow.find(windowID: id, pid: pid, approximateFrame: approx) else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let q = self.proxies[id] ?? self.away[id], q === p, q.ax == nil else { return }
+                    q.ax = ax
+                    if self.activeProxy === q { self.env?.watcher.observe(pid: pid, window: ax.element) }
+                }
+            }
+        }
+    }
+
     /// Whether a window in front at 1:1 sits natively where the canvas draws it at the camera now: the
     /// canvas at 1:1 (zoomed out, nothing is where the canvas has it) and the native origin within a
     /// couple of points of the canvas place.
@@ -6654,16 +6841,17 @@ final class CanvasController {
         return abs(expected.x - real.minX) <= 2 && abs(expected.y - real.minY) <= 2
     }
 
-    private func adopt(_ p: WindowProxy, ax: AXWindow, real: CGRect) {
+    private func adopt(_ p: WindowProxy, ax: AXWindow?, real: CGRect) {
         NSLog("Absorb: \(p.appName) — \(p.title) at \(real.integral)")
         clearPending()
         liftWindow(p)
         view.bringToFront(p)
-        p.ax = ax
+        if let ax { p.ax = ax }
         p.placedNatively(at: real)
         // Instant, not animated: the real window already covers its proxy.
         view.set(camera: cameraAligning(p, with: real))
         enter(p, realFrame: real, activateApp: false)
+        if p.ax == nil { fetchHandle(for: p) }
     }
 
     /// Focus moved to another window of the entered app (⌘`, a click on a sibling, ⌘N): it becomes
@@ -6968,8 +7156,10 @@ final class CanvasController {
             moveSwitcher(.app(reverse ? -1 : 1))
         }
         // Not `showCanvas`: right after a handoff the app can still read as active while the other
-        // app's activation lands, and the early return there would leave the canvas behind.
-        if current != nil { show() }
+        // app's activation lands, and the early return there would leave the canvas behind. From
+        // behind another app with nothing entered (a launch left in front, a dialog), the canvas comes
+        // forward too; not from behind a window used where it's drawn, where it's up already.
+        if current != nil || (!NSApp.isActive && !usingScaledWindow) { show() }
     }
 
     /// The strip, laid out for this cycle, its first selection at rest. Not with the strip turned off
@@ -7291,8 +7481,9 @@ final class CanvasController {
     /// canvas and leaves `passingThrough` on the window drawn behind it) or a focus the canvas just
     /// asked for (`focusInPlace`).
     private func isScaledUseActivation(_ pid: pid_t) -> Bool {
+        if WindowList.pointerOverDock() { return false }   // a Dock click, whatever was asked or hovered just before
         if let asked = scaledFocusAsked, asked.pid == pid, CACurrentMediaTime() < asked.until { return true }
-        return passingThrough?.pid == pid && !WindowList.pointerOverDock()
+        return passingThrough?.pid == pid
     }
 
     private var usingScaledWindow: Bool {
@@ -7345,6 +7536,7 @@ final class CanvasController {
         usedScaledPIDs.insert(pid)
         scaledFocusAsked = (pid, CACurrentMediaTime() + 1)
         focusedScaledID = p.windowID
+        wantsFrontUntil = 0   // the canvas yields on purpose
         AXQueue.interactive.async { [weak self] in
             ax?.raise()
             DispatchQueue.main.async {

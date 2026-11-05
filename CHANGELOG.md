@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3
+
+- Clicking an app in the Dock, or switching to it with ⌘Tab or Spotlight, always takes the camera to its window. Apps slow to answer (Electron apps, or focus on a panel) no longer leave the camera where it was or bring the canvas straight back, and an app with a window on the canvas and another minimized goes into the one on the canvas.
+- A minimized window put back from the Dock to a place out of view is shown: the canvas moves over to it.
+- ⌘Tab (or the Mission Control key, a four-finger pan, Show Desktop) right after going into a window brings the canvas back as it should, instead of being covered by the window you just left.
+- A Dock click right after closing a window from the canvas, or right after hovering over the same app, is no longer ignored.
+
 ## 0.2.2
 
 - Tell Sunlight shows what it's doing with its own pointer: a yellow pointer with a Sunlight tag glides to each control before pressing it, outlines it and ripples on the press, shows text as it's typed, scans a window as it reads it and outlines the window it's working in, and the screen edges glow while a request runs. It follows the window as it moves, the canvas pans and you zoom, and waits at the screen edge pointing at a window out of view. Your own pointer and keyboard are never touched, and esc still stops it mid-move. Settings > Experimental > Tell Sunlight > Show what it's doing (on by default).
