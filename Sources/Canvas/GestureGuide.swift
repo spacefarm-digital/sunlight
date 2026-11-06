@@ -19,9 +19,10 @@ enum GestureGuide {
             }
         }
 
-        /// The gestures in this tab, with See All shown the way Settings › How to use has it.
-        func gestures(seeAll: Settings.SeeAllGesture) -> [Gesture] {
-            Gesture.allCases.filter { $0.group == self && $0 != (seeAll == .tap ? .swipeUp : .fourFingerTap) }
+        /// The gestures in this tab. Both See Everything gestures show: Settings › Trackpad binds each
+        /// four-finger gesture separately, so neither is hidden.
+        var gestures: [Gesture] {
+            Gesture.allCases.filter { $0.group == self }
         }
 
         var footer: String? {
@@ -103,6 +104,17 @@ enum GestureGuide {
             case .click, .doubleClick, .drag: return 1
             case .secondaryClick, .pinch, .pinchIn, .scroll: return 2
             case .fourFingerDrag, .fourFingerTap, .swipeUp, .spread: return 4
+            }
+        }
+
+        /// The same gesture where Settings › Trackpad can bind it, if it is one of those.
+        var trackpadGesture: TrackpadGesture? {
+            switch self {
+            case .fourFingerTap: return .fourFingerTap
+            case .swipeUp: return .swipeUp
+            case .spread: return .spread
+            case .fourFingerDrag: return .fourFingerDrag
+            default: return nil
             }
         }
 
@@ -558,12 +570,14 @@ struct TrackpadPicture: View {
     }
 }
 
-/// Settings › How to use: the three tabs of gestures, and the picture acting out the one picked or pointed
-/// at, as in System Settings › Trackpad.
+/// Settings › Trackpad: the three tabs of gestures, and the picture acting out the one picked or pointed
+/// at, as in System Settings › Trackpad — and below them, what every four-finger gesture does, which is
+/// the person's to change.
 struct TrackpadPane: View {
     @State private var group: GestureGuide.Group = .pointAndClick
     @State private var gesture: GestureGuide.Gesture = .click
-    @State private var seeAll: Settings.SeeAllGesture = Settings.seeAllGesture
+    /// Bumped when a binding changes, so the rows and the picture's caption redraw.
+    @State private var revision = 0
 
     var body: some View {
         Form {
@@ -571,8 +585,8 @@ struct TrackpadPane: View {
                 VStack(spacing: 14) {
                     GestureStage(gesture: gesture)
                     VStack(spacing: 4) {
-                        Text(gesture.title).font(.headline)
-                        Text(gesture.line)
+                        Text(gesture.how).font(.headline)
+                        Text(actionTitle(gesture))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -586,9 +600,9 @@ struct TrackpadPane: View {
                 .padding(.top, 10)
             }
             Section {
-                ForEach(group.gestures(seeAll: seeAll)) { item in
+                ForEach(group.gestures, id: \.title) { item in
                     HStack {
-                        RowLabel(title: item.title, subtitle: item.how)
+                        RowLabel(title: item.how, subtitle: actionTitle(item))
                         Spacer()
                         if item == gesture {
                             Image(systemName: "play.fill")
@@ -622,26 +636,116 @@ struct TrackpadPane: View {
                 }
             }
             Section {
-                Picker("See everything with", selection: $seeAll) {
-                    ForEach(Settings.SeeAllGesture.allCases) { Text($0.title).tag($0) }
+                Picker("Single-click window", selection: clickBinding(double: false)) {
+                    ForEach(Settings.WindowClickAction.choices, id: \.self) { Text($0.title) }
                 }
-                .pickerStyle(.radioGroup)
-                .labelsHidden()
+                Picker("Double-click window", selection: clickBinding(double: true)) {
+                    ForEach(Settings.WindowClickAction.choices, id: \.self) { Text($0.title) }
+                }
+                Picker("Secondary click", selection: Binding(
+                    get: { Settings.secondaryClickAction },
+                    set: { Settings.secondaryClickAction = $0; revision += 1 }
+                )) {
+                    ForEach(Settings.SecondaryClickAction.choices, id: \.self) { Text($0.title) }
+                }
+                Picker("Drag a window", selection: Binding(
+                    get: { Settings.windowDragAction },
+                    set: { Settings.windowDragAction = $0; revision += 1 }
+                )) {
+                    ForEach(Settings.WindowDragAction.allCases, id: \.self) { Text($0.title) }
+                }
             } header: {
-                SectionHeader(title: "See everything",
-                              detail: "The four-finger gesture that shows every window.")
+                SectionHeader(title: "Window clicks",
+                              detail: "On the canvas, the first click acts immediately, including before a second click. Secondary-click commands use the window under the pointer. At 1:1, primary clicks reach the window. These choices also apply to a mouse.")
+            }
+            Section {
+                Picker("Two-finger scroll", selection: Binding(
+                    get: { Settings.canvasScrollBehavior },
+                    set: { Settings.canvasScrollBehavior = $0; revision += 1 }
+                )) {
+                    ForEach(Settings.ScrollBehavior.allCases, id: \.self) { Text($0.title) }
+                }
+                Picker("Zoom with scroll while holding", selection: Binding(
+                    get: { Settings.scrollZoomModifier },
+                    set: { Settings.scrollZoomModifier = $0; revision += 1 }
+                )) {
+                    ForEach(Settings.ScrollZoomModifier.allCases, id: \.self) { Text($0.title) }
+                }
+                Toggle("Pinch to zoom canvas", isOn: Binding(
+                    get: { Settings.canvasPinchEnabled },
+                    set: { Settings.canvasPinchEnabled = $0; revision += 1 }
+                ))
+                Toggle("Automatically enter windows when zooming", isOn: Binding(
+                    get: { Settings.enterOnZoom },
+                    set: { Settings.enterOnZoom = $0; revision += 1 }
+                ))
+            } header: {
+                SectionHeader(title: "Zoom and pan",
+                              detail: "These apply to the canvas. Scroll over a window at 1:1 still reaches that window unless the zoom modifier is held.")
+            }
+            Section {
+                ForEach(TrackpadGesture.allCases) { item in
+                    Picker(selection: binding(for: item)) {
+                        Text("Nothing").tag(Command?.none)
+                        ForEach(Command.allCases.filter { !$0.isCanvasLocal && !$0.isMenuShortcut && ($0 != .panCanvas || item == .fourFingerDrag) }) { command in
+                            Text(command.menuTitle).tag(Command?.some(command))
+                        }
+                    } label: {
+                        RowLabel(title: item.title, subtitle: item.how)
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("Restore Trackpad Defaults") {
+                        Settings.resetTrackpadControls()
+                        revision += 1
+                    }
+                }
+            } header: {
+                SectionHeader(title: "What they do",
+                              detail: "Choose what each gesture does, or leave it unbound. Panning needs a continuous four-finger drag. When flicks are bound, another drag action waits briefly to distinguish them.")
             } footer: {
-                Text("With swipe up, a slow drag up still pans.")
+                Text("A gesture with nothing bound is left to the Mac where it can be, and does nothing where it can’t. Clicks, two-finger scrolls and pinches stay the canvas’s own, as on the desktop.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)
-        .onChange(of: group) { gesture = group.gestures(seeAll: seeAll)[0] }
-        .onChange(of: seeAll) {
-            Settings.seeAllGesture = seeAll
-            if gesture == .fourFingerTap || gesture == .swipeUp { gesture = seeAll == .tap ? .fourFingerTap : .swipeUp }
-        }
+        .onChange(of: group) { gesture = group.gestures[0] }
+        .onReceive(NotificationCenter.default.publisher(for: Bindings.didChange)) { _ in revision += 1 }
+        .onReceive(NotificationCenter.default.publisher(for: Settings.experimentalFeaturesDidChange)) { _ in revision += 1 }
+    }
+
+    /// The action a gesture does now, for its row and the picture's caption.
+    private func actionTitle(_ item: GestureGuide.Gesture) -> String {
+        if item == .click { return Settings.windowClickAction(double: false).title }
+        if item == .doubleClick { return Settings.windowClickAction(double: true).title }
+        if item == .secondaryClick { return Settings.secondaryClickAction.title }
+        if item == .drag { return Settings.windowDragAction.title }
+        if item == .scroll { return Settings.canvasScrollBehavior.title }
+        if item == .pinch { return Settings.canvasPinchEnabled ? "Zoom canvas" : "Nothing" }
+        guard let gesture = item.trackpadGesture else { return item.title }
+        return Bindings.command(for: gesture)?.title ?? "Nothing"
+    }
+
+    private func binding(for gesture: TrackpadGesture) -> Binding<Command?> {
+        Binding(
+            get: { Bindings.command(for: gesture) },
+            set: { command in
+                Bindings.setGesture(command, for: gesture)
+                revision += 1
+            }
+        )
+    }
+
+    private func clickBinding(double: Bool) -> Binding<Settings.WindowClickAction> {
+        Binding(
+            get: { Settings.windowClickAction(double: double) },
+            set: { value in
+                Settings.setWindowClickAction(value, double: double)
+                revision += 1
+            }
+        )
     }
 }

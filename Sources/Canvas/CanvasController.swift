@@ -229,7 +229,8 @@ final class CanvasController {
     private var pendingSwitcherCommit = false
     /// Four-finger travel that arrived while the canvas was still coming to the front; applied in
     /// `returnedToCanvas` for the same reason.
-    private var pendingPan: CGVector?
+    private var pendingPan: PendingTrackpadPan?
+    private var pendingPanEnded = false
     /// The four-finger drag under way began from a window, so the canvas is in front because of it.
     private var panBroughtCanvas = false
 
@@ -332,6 +333,7 @@ final class CanvasController {
         window.title = "Sunlight"
 
         view.onHandoff = { [weak self] proxy in self?.handoff(to: proxy) }
+        view.onCenteredClick = { [weak self] proxy, double in self?.handoff(to: proxy, click: !double) }
         view.onDesktopDismissed = { [weak self] in self?.endShowDesktop(flyBack: false) }
         view.desktopFloor = desktopFloor
         view.onFloorClick = { [weak self] icon, modifiers, released in self?.floorClick(icon, modifiers: modifiers, released: released) }
@@ -342,9 +344,15 @@ final class CanvasController {
         view.onSpring = { [weak self] proxy, point in self?.springInto(proxy, around: point) }
         view.onFileDragEnded = { [weak self] in self?.fileDragEnded() }
         view.onEnter = { [weak self] proxy, point in self?.handoff(to: proxy, placement: .inPlace(around: point)) }
-        view.onClickEnter = { [weak self] proxy, point, offset in
+        view.onClickEnter = { [weak self] proxy, point, offset, double in
             self?.preClickCamera = self?.view.camera
-            self?.handoff(to: proxy, placement: .clicked(at: point, offset: offset))
+            self?.handoff(to: proxy, placement: .clicked(at: point, offset: offset), click: !double)
+        }
+        view.onClickCommand = { [weak self] proxy, command in
+            guard let self else { return }
+            if let preset = command.preset { self.tile(proxy, preset) }
+            else if let arrangement = command.arrangement { self.arrange(columns: arrangement.columns, rows: arrangement.rows, around: proxy) }
+            else { self.desk?.perform(command, on: self) }
         }
         view.onClickFocus = { [weak self] proxy in self?.focusFromFlight(proxy) }
         view.onUse = { [weak self] proxy, point, press in self?.use(proxy, around: point, press: press) }
@@ -385,6 +393,10 @@ final class CanvasController {
         }
         view.onViewportChanged = { [weak self] in self?.scheduleCapturePass() }
         view.onSettle = { [weak self] in self?.snapToWindow() ?? false }
+        view.onPanRelease = { [weak self] start in self?.snapToWindow(requireCenterInside: true, releaseStart: start) ?? false }
+        view.onFourFingerPanEnd = { [weak self] start, direction in
+            self?.snapToWindow(pan: (start, direction), requireCenterInside: true, releaseStart: start) ?? false
+        }
         view.onHover = { [weak self] p in if let p { self?.prefetchAX(p) } }
         view.onMoved = { [weak self] p in
             p.tile = nil   // placed by hand
@@ -1519,52 +1531,72 @@ final class CanvasController {
     }
 
     /// A four-finger drag pans the canvas from wherever the user is. From a window (or any other app)
-    /// the canvas comes to the front first, as with the Mission Control key, and the travel waits for it to arrive. A
-    /// four-finger tap (or, by Settings › How to use, a quick flick up) is the Mission Control key: from a
-    /// window, the canvas with everything fitted; done again on the canvas, back into the window it
-    /// came from.
+    /// the canvas comes to the front first, as with the Mission Control key, and the travel waits for it to arrive.
+    /// Gestures that fire instead of panning (a tap, a flick, a spread) arrive as `.gesture`, which
+    /// `Desk` turns into the command Settings › Trackpad gives them.
     func trackpadPan(_ phase: TrackpadPan.Phase) {
         let inFront = NSApp.isActive && activeProxy == nil
         switch phase {
-        case .seeAll:
-            NSLog("Pan: four-finger See All")
-            // A flick was a drag until this moment: the pan stops where it is, without coasting.
-            if inFront, pendingPan == nil { view.trackpadPanCancelled() }
-            pendingPan = nil
-            let fromWindow = panBroughtCanvas
-            panBroughtCanvas = false
-            guard addingWidgets == nil, !isSetupShowing else { return }   // the desktop is in edit mode; Done comes back
-            // A flick from a window has already brought the canvas (its drag did): it still means See
-            // All, not back again. On the canvas, either gesture again goes back into the last window.
-            if fromWindow || !NSApp.isActive { showCanvas(fitAll: true) } else { toggle() }
-        case .spread:
-            NSLog("Pan: four-finger spread")
-            showDesktop()
+        case .gesture:
+            break   // Desk handles these; a canvas only sees them through `seeAll()` or its commands.
         case .began:
             NSLog("Pan: four-finger drag\(inFront ? "" : ", bringing the canvas back")")
             pendingPan = nil
+            pendingPanEnded = false
             panBroughtCanvas = !inFront
             if !inFront {
-                pendingPan = .zero
+                pendingPan = PendingTrackpadPan(viewWidth: view.bounds.width, sensitivity: CGFloat(Settings.trackpadCameraSensitivity), at: CACurrentMediaTime())
                 show()
             }
         case .changed(let travel):
-            if let pending = pendingPan {
-                pendingPan = CGVector(dx: pending.dx + travel.dx, dy: pending.dy + travel.dy)
+            if var pending = pendingPan {
+                pending.add(travel, at: CACurrentMediaTime())
+                pendingPan = pending
             } else if inFront {
                 view.trackpadPan(by: travel)
             } else {
                 // Something took the front mid-drag (typically the activation of a window just handed
                 // off to, landing late). The drag still wants the canvas.
                 NSLog("Pan: lost the front mid-drag, bringing the canvas back")
-                pendingPan = travel
+                var pending = PendingTrackpadPan(viewWidth: view.bounds.width, sensitivity: CGFloat(Settings.trackpadCameraSensitivity), at: CACurrentMediaTime())
+                pending.add(travel, at: CACurrentMediaTime())
+                pendingPan = pending
                 show()
             }
         case .ended:
-            if inFront, pendingPan == nil { view.trackpadPanEnded() }
-            pendingPan = nil
+            if pendingPan != nil {
+                pendingPan?.end(at: CACurrentMediaTime())
+                pendingPanEnded = true
+            } else if inFront {
+                view.trackpadPanEnded()
+            }
             panBroughtCanvas = false
         }
+    }
+
+    /// A four-finger gesture bound to something else fired mid-drag: the pan stops where it is, without
+    /// coasting, and the gesture's command goes ahead.
+    func cancelTrackpadPan(preserveOrigin: Bool = false) {
+        if NSApp.isActive && activeProxy == nil && pendingPan == nil { view.trackpadPanCancelled() }
+        pendingPan = nil
+        pendingPanEnded = false
+        if !preserveOrigin { panBroughtCanvas = false }
+    }
+
+    /// See Everything, from the four-finger tap or a flick (or the Mission Control key): from a window,
+    /// the canvas with everything fitted; done again on the canvas, back into the window it came from.
+    func seeAll() {
+        NSLog("Pan: See All")
+        // A flick was a drag until this moment: the pan stops where it is, without coasting.
+        if NSApp.isActive && activeProxy == nil && pendingPan == nil { view.trackpadPanCancelled() }
+        pendingPan = nil
+        pendingPanEnded = false
+        let fromWindow = panBroughtCanvas
+        panBroughtCanvas = false
+        guard addingWidgets == nil, !isSetupShowing else { return }   // the desktop is in edit mode; Done comes back
+        // A flick from a window has already brought the canvas (its drag did): it still means See
+        // All, not back again. On the canvas, either gesture again goes back into the last window.
+        if fromWindow || !NSApp.isActive { showCanvas(fitAll: true) } else { toggle() }
     }
 
     // MARK: Show Desktop
@@ -4600,25 +4632,25 @@ final class CanvasController {
     /// How a window is entered (`Handoff.Placement`).
     typealias Placement = Handoff.Placement
 
-    /// A click's way in lasts at least this long, so a second click (a double-click) still lands on the
-    /// canvas, which re-aims it to the middle, and never on the real window as a click of its own.
+    /// Keep the canvas in front during the double-click interval so a second click can redirect
+    /// the entrance instead of reaching the real window.
     private static var clickEntryDuration: CFTimeInterval {
-        min(max(NSEvent.doubleClickInterval, CanvasView.cameraDuration), 0.6)
+        max(NSEvent.doubleClickInterval, CanvasView.cameraDuration)
     }
 
     /// `spatial`: travel there across the canvas (the switcher's pan-and-zoom flight) rather than the
     /// straight zoom-in a click or ⏎ gets. `gliding`: the window is drawn there now (where it opened, at
-    /// 1:1 in front of everything) and glides to its place on the canvas as the camera goes to it, so
-    /// it never leaves the screen on the way (live windows; see `slide(into:)`).
-    func handoff(to p: WindowProxy, placement: Placement = .centered, spatial: Bool = false, gliding from: CGPoint? = nil) {
+    /// 1:1 in front of everything) and glides to its place on the canvas as the camera goes to it.
+    func handoff(to p: WindowProxy, placement: Placement = .centered, spatial: Bool = false,
+                 gliding from: CGPoint? = nil, click: Bool = false) {
         guard !handingOff, p.kind == .window else { return letGo(p) }
-        // A sheet or prompt is entered through its parent, which it rides on; the clicked spot stays put.
+        // A sheet or prompt is entered through its parent; preserve the clicked spot and timing.
         if let parent = parentOf(p) {
             var placement = placement
             if case .clicked(let at, let offset) = placement {
                 placement = .clicked(at: at, offset: CGPoint(x: offset.x + p.attachmentOffset.x, y: offset.y + p.attachmentOffset.y))
             }
-            return handoff(to: parent, placement: placement, spatial: spatial)
+            return handoff(to: parent, placement: placement, spatial: spatial, click: click)
         }
         // A window in Picture in Picture returns to 1:1 where its tile is; the camera stays (`returnFromPip`).
         if p.pip != nil { return returnFromPip(p) }
@@ -4671,9 +4703,8 @@ final class CanvasController {
             let destination = nativeOrigin(of: p, at: target)
             // At 1:1, in place, there's nowhere to fly: a few frames and it's in use.
             var duration = view.camera.isClose(to: target) ? CanvasController.stayingDuration : CanvasView.cameraDuration
-            if clicked { duration = max(duration, CanvasController.clickEntryDuration) }
-            // A window gliding in from where it opened travels for at least a camera flight, and the
-            // shadow's ease is timed against that same duration.
+            if click { duration = max(duration, CanvasController.clickEntryDuration) }
+            // A window gliding from where it opened needs at least a camera flight.
             let glides = from.map { $0 != p.worldRect.origin } ?? false
             if glides { duration = max(duration, CanvasView.cameraDuration) }
             shadowFlight = (p.windowID, CACurrentMediaTime(), duration)
@@ -4782,7 +4813,7 @@ final class CanvasController {
             view.fly(to: aligned, completion: complete)
         } else {
             var duration = move == nil && view.camera.isClose(to: aligned) ? CanvasController.stayingDuration : CanvasView.cameraDuration
-            if clicked { duration = max(duration, CanvasController.clickEntryDuration) }
+            if click { duration = max(duration, CanvasController.clickEntryDuration) }
             view.animateCamera(to: aligned, duration: duration, moving: move.map { [(p, $0)] } ?? [], completion: complete)
             // One more full frame timed to land just before the seam.
             DispatchQueue.main.asyncAfter(deadline: .now() + max(0, duration - 0.09)) { [weak self, weak p] in
@@ -5075,11 +5106,11 @@ final class CanvasController {
                     damping: PictureInPicture.Reference.enterDamping, completion: complete)
     }
 
-    /// The camera came to rest after the user moved it: nearly on a screen-sized window (near 1:1, its
-    /// edges nearly where they'd be on screen), it nudges the rest of the way on a quick spring and
-    /// enters it in the middle, as a double-click would (`WindowSnap`). True when it did.
-    private func snapToWindow() -> Bool {
-        guard Settings.snapToWindows, !handingOff, NSApp.isActive, activeProxy == nil, switcher == nil,
+    /// A four-finger release favours a neighbour in the direction of travel; other gestures
+    /// use the nearby snap. Both use the same placement plan as handoff.
+    private func snapToWindow(pan: (Camera, CGVector)? = nil, requireCenterInside: Bool = false,
+                              releaseStart: Camera? = nil) -> Bool {
+        guard (Settings.snapToWindows || pan != nil), !handingOff, NSApp.isActive, activeProxy == nil, switcher == nil,
               !isShowingDesktop, addingWidgets == nil, !isSetupShowing else { return false }
         let windows = view.proxies.filter { $0.kind == .window && $0.away == nil && !$0.leaving && $0.pip == nil }
         let visible = visibleTopLeft
@@ -5089,11 +5120,27 @@ final class CanvasController {
                                     tiledArea: tiledArea(of: p)).origin
             return WindowSnap.Window(rect: p.worldRect, spot: spot)
         }
-        guard let hit = WindowSnap.target(camera: view.camera, viewSize: view.bounds.size, visible: visible, windows: spots) else {
-            return false
+        let strength: WindowSnap.Strength = Settings.windowSnapStrength == .normal ? .normal : .strong
+        let sensitivity = CGFloat(Settings.windowCenteringSensitivity)
+        let preferred = lastActiveProxy.flatMap { active in windows.firstIndex { $0 === active } }
+        let selected: (index: Int, camera: Camera, directional: Bool)?
+        if requireCenterInside {
+            selected = WindowSnap.releaseTarget(camera: view.camera, viewSize: view.bounds.size, visible: visible,
+                                                windows: spots, strength: strength, sensitivity: sensitivity,
+                                                panStart: releaseStart, direction: pan?.1, preferredIndex: preferred,
+                                                allowFallback: Settings.snapToWindows)
+        } else {
+            selected = WindowSnap.target(camera: view.camera, viewSize: view.bounds.size, visible: visible,
+                                         windows: spots, strength: strength, sensitivity: sensitivity)
+                .map { ($0.index, $0.camera, false) }
         }
+        guard let hit = selected else { return false }
         let p = windows[hit.index]
         NSLog("Snap: onto \(p.appName) — \(p.title)")
+        if hit.directional {
+            handoff(to: p)
+            return true
+        }
         view.snap(to: hit.camera) { [weak self, weak p] in
             guard let self, let p, self.proxies[p.windowID] === p else { return }
             self.handoff(to: p)
@@ -5564,9 +5611,13 @@ final class CanvasController {
             layoutStrip(animated: true, following: wasIn)
         }
         applyPendingSwitcher()
-        if let travel = pendingPan {
+        if let pending = pendingPan {
             pendingPan = nil
-            view.trackpadPan(by: travel)
+            view.trackpadPan(by: pending.travel, preservingVelocity: pending.velocity)
+            if pendingPanEnded {
+                pendingPanEnded = false
+                view.trackpadPanEnded(releaseVelocity: pending.releaseVelocity)
+            }
         }
         if pendingShowDesktop {
             pendingShowDesktop = false

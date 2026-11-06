@@ -11,6 +11,13 @@ final class SwitcherKeysTests: XCTestCase {
         return KeyTap.action(keyCode: key, flags: flags, state: &state)
     }
 
+    func testRecordingAllowsKeysNormallyTakenByTheTap() {
+        var state = KeyTap.State()
+        state.recordingShortcut = true
+        XCTAssertEqual(KeyTap.action(keyCode: left, flags: .maskControl, state: &state), .pass)
+        XCTAssertEqual(KeyTap.action(keyCode: tab, flags: .maskCommand, state: &state), .pass)
+    }
+
     func testCommandTabOpensThenSteps() {
         var state = KeyTap.State()
         XCTAssertEqual(KeyTap.action(keyCode: tab, flags: .maskCommand, state: &state), .send(.appSwitchBegin(reverse: false)))
@@ -43,6 +50,9 @@ final class SwitcherKeysTests: XCTestCase {
     func testOnlyTheMissionControlKeySeesAll() {
         let missionControlKey: Int64 = 160
         XCTAssertEqual(act(missionControlKey, [], open: false), .send(.missionControl))
+        var state = KeyTap.State()
+        state.toggleCanvasOnMissionControl = false
+        XCTAssertEqual(KeyTap.action(keyCode: missionControlKey, flags: [], state: &state), .pass)
         XCTAssertEqual(act(up, .maskControl, open: false), .swallow, "⌃↑ would open Mission Control: one Desktop, the canvas")
         XCTAssertEqual(act(down, .maskControl, open: false), .swallow, "⌃↓ would open App Exposé")
         XCTAssertEqual(act(grave, .maskAlternate, open: false), .pass, "⌥` is the app's own")
