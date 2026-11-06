@@ -177,3 +177,7 @@ The Dock add-on and its loader in `LiveWindows/osax` are adapted from
 [yabai](https://github.com/koekeishiya/yabai)'s scripting addition (MIT, © 2019 Åsmund Vikane), by way of
 the macOS 27 fork at [LCS-Dev-Ergos/yabai](https://github.com/LCS-Dev-Ergos/yabai); see
 `LiveWindows/osax/LICENSE-yabai.txt`. Huge thanks to everyone who figured out the Dock first.
+
+You can customise keyboard shortcuts, trackpad gestures and camera sensitivity in Settings. Optional
+release-time centering, directional navigation and free four-finger steering are off by default; the
+default controls and 100% sensitivity match Sunlight's original behaviour.

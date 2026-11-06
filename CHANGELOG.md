@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Configure shortcuts, trackpad gestures and camera sensitivity in Settings.
+- Optional release-time window centering, directional navigation and free four-finger steering.
+
 ## 0.2.3
 
 - Clicking an app in the Dock, or switching to it with ⌘Tab or Spotlight, always takes the camera to its window. Apps slow to answer (Electron apps, or focus on a panel) no longer leave the camera where it was or bring the canvas straight back, and an app with a window on the canvas and another minimized goes into the one on the canvas.
