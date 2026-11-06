@@ -4,16 +4,11 @@ import XCTest
 final class GestureGuideTests: XCTestCase {
     typealias Gesture = GestureGuide.Gesture
 
-    func testEveryGestureIsInExactlyOneTabAndSeeAllShowsTheChosenOne() {
-        let withTap = GestureGuide.Group.allCases.flatMap { $0.gestures(seeAll: .tap) }
-        let withSwipe = GestureGuide.Group.allCases.flatMap { $0.gestures(seeAll: .swipeUp) }
-        XCTAssertEqual(Set(withTap).union(withSwipe), Set(Gesture.allCases))
-        XCTAssertEqual(withTap.count, Gesture.allCases.count - 1)
-        XCTAssertTrue(withTap.contains(.fourFingerTap))
-        XCTAssertFalse(withTap.contains(.swipeUp))
-        XCTAssertTrue(withSwipe.contains(.swipeUp))
-        XCTAssertFalse(withSwipe.contains(.fourFingerTap))
-        XCTAssertTrue(GestureGuide.Group.allCases.allSatisfy { !$0.gestures(seeAll: .tap).isEmpty })
+    func testEveryGestureIsInExactlyOneTab() {
+        let all = GestureGuide.Group.allCases.flatMap(\.gestures)
+        XCTAssertEqual(Set(all), Set(Gesture.allCases))
+        XCTAssertEqual(all.count, Gesture.allCases.count)
+        XCTAssertTrue(GestureGuide.Group.allCases.allSatisfy { !$0.gestures.isEmpty })
     }
 
     func testFingersOnTheTrackpadMatchTheGestureAndStayOnIt() {

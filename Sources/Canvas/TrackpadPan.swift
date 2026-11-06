@@ -24,20 +24,35 @@ final class TrackpadPan: @unchecked Sendable {
         /// Finger travel since the last update, in trackpad widths, y down. The content follows it.
         case changed(CGVector)
         case ended
-        /// A four-finger tap, as the fingers lift; or a flick up, mid-drag, after which the pan is over
-        /// with no `ended` to follow.
-        case seeAll
-        /// The four fingers spread apart (Show Desktop), once per touch. No pan comes with it.
-        case spread
+        /// A four-finger tap, a flick, a spread or a rebound drag: a gesture finished, and Settings ›
+        /// Trackpad says what it does. A flick's pan is over with no `ended` to follow.
+        case gesture(TrackpadGesture)
+    }
+
+    /// What the recognizer should watch for: the gestures Settings › Trackpad has given something to do.
+    /// A gesture with nothing bound is left alone, so the Mac or the pan gets it.
+    struct GestureConfig: Sendable, Equatable {
+        enum Drag: Sendable, Equatable {
+            /// Four fingers moving pan the canvas, as they always have.
+            case pan
+            /// The drag is bound to another command: fire it once, as the fingers start moving.
+            case fire
+            /// Nothing is bound: a four-finger drag does nothing at all.
+            case off
+        }
+
+        var freeSteering = false
+        var tap = false
+        var spread = false
+        var flicks: Set<TrackpadGesture> = []
+        var drag: Drag = .pan
     }
 
     /// Centroid travel, in trackpad widths, before four fingers on the trackpad count as a drag. Keeps
     /// a four-finger tap or pinch from moving anything.
     fileprivate static let slop: CGFloat = 0.02
-    /// A drag that starts within this angle of horizontal stays level until the fingers lift. No
-    /// four-finger drag is ever quite level, and sweeping along a row of windows shouldn't creep up or
-    /// down (a window's top under the menu bar can't be entered where it is). One within this angle of
-    /// vertical stays plumb the same way.
+    /// A mostly horizontal or vertical drag initially suppresses accidental sideways drift.
+    /// A deliberate turn releases that lock; the same angle also distinguishes straight flicks.
     fileprivate static let axisLock: CGFloat = 22.5 * .pi / 180
     /// A tap's or flick's four fingers land together: the fourth within this long of the first. A
     /// finger that joins a three-finger tap (Look Up) or swipe (back, forward) later never makes one.
@@ -86,10 +101,10 @@ final class TrackpadPan: @unchecked Sendable {
     @MainActor func start() {
         guard thread == nil else { return }
         TrackpadPan.shared = self
-        // Settings is the main actor's; the recognizer keeps its own copy of the one choice it needs.
+        // Settings is the main actor's; the recognizer keeps its own copy of the choices it needs.
         followSetting()
         settingToken = NotificationCenter.default.addObserver(
-            forName: Settings.seeAllGestureDidChange, object: nil, queue: .main
+            forName: Bindings.didChange, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.followSetting() }
         }
@@ -109,8 +124,8 @@ final class TrackpadPan: @unchecked Sendable {
     }
 
     @MainActor private func followSetting() {
-        let swipeUp = Settings.seeAllGesture == .swipeUp
-        state.withLock { $0.swipeUpSeesAll = swipeUp }
+        let config = Bindings.trackpadConfig()
+        state.withLock { $0.config = config }
     }
 
     /// Sunlight on or off (the menu bar switch). Off, the four fingers are the Mac's own again: the
@@ -275,9 +290,11 @@ struct TrackpadRecognizer {
     var anchorSpread: CGFloat = 0
     /// The centroid at the previous frame while dragging.
     var last: CGPoint?
-    /// The drag is held level (dy = 0) or plumb (dx = 0), decided as it begins; nil for a free
-    /// (diagonal) drag.
+    /// The initial axis, until the user deliberately steers away from it; nil for free movement.
     var lock: Lock?
+    private var crossAxisTravel: CGFloat = 0
+    /// Settings › Trackpad: which four-finger gestures have something to do.
+    var config = TrackpadPan.GestureConfig()
     /// Settings › How to use: a quick flick up is See All, instead of a tap.
     var swipeUpSeesAll = false
     /// Sunlight is on: the four fingers are the canvas's, and the system's own swipes are held off.
@@ -287,8 +304,12 @@ struct TrackpadRecognizer {
     /// Where the centroid was and when, as the drag began; a flick is measured from there.
     var dragOrigin: CGPoint?
     var dragBegan: CFAbsoluteTime = 0
-    /// The spread has fired; the rest of the touch does nothing.
+    /// The touch has fired its one gesture (a spread, a flick or a rebound drag); the rest does nothing.
     var swiped = false
+    /// The drag is bound to something other than panning, and fired as the fingers began moving.
+    var dragHandled = false
+    /// A non-pan drag waits briefly for a configured flick to distinguish the two gestures.
+    var pendingDrag = false
 
     enum Lock { case level, plumb }
     /// When the first finger of this touch landed; nil with no finger down.
@@ -312,11 +333,12 @@ struct TrackpadRecognizer {
         // A finger landed or lifted: whatever was under way is over. Four fingers that landed together,
         // never moved and lift again at once were a tap.
         guard ids.count == 4 else {
-            let tap = !swipeUpSeesAll && ids.count < 4 && fingers.count == 4 && last == nil && !swiped
+            let fireDrag = pendingDrag && config.drag == .fire
+            let tap = config.tap && ids.count < 4 && fingers.count == 4 && last == nil && !swiped && !dragHandled
                 && !stirred && landedTogether && now - began <= TrackpadPan.tapDuration
-            return reset() + (tap ? [.seeAll] : [])
+            return reset() + (fireDrag ? [.gesture(.fourFingerDrag)] : []) + (tap ? [.gesture(.fourFingerTap)] : [])
         }
-        if ids == fingers, swiped { return [] }
+        if ids == fingers, swiped || dragHandled { return [] }
         guard ids == fingers, let from = last ?? anchor else {
             let phases = reset()
             self.device = device
@@ -334,7 +356,7 @@ struct TrackpadRecognizer {
             let grown = spread - anchorSpread
             if grown >= TrackpadPan.spreadDistance {
                 swiped = true
-                return [.spread]
+                return config.spread ? [.gesture(.spread)] : []
             }
             if abs(grown) >= TrackpadPan.slop || hypot(travel.dx, travel.dy) >= TrackpadPan.slop { stirred = true }
             // Spreading fingers shift the centroid too (the thumb moves furthest); while the spread keeps
@@ -352,22 +374,50 @@ struct TrackpadRecognizer {
             } else {
                 lock = nil
             }
-            phases.append(.began)
-        }
-        if swipeUpSeesAll, let origin = dragOrigin, landedTogether, now - dragBegan <= TrackpadPan.flickWindow {
-            // Still early enough to be a flick: the whole travel so far, straight up and far enough,
-            // makes one. The pan it interrupts has moved the canvas a little; See All goes on from there.
-            let rise = centroid.y - origin.y   // the centroid's y goes up the trackpad
-            let run = abs(centroid.x - origin.x)
-            if rise >= TrackpadPan.swipeDistance, atan2(rise, run) >= .pi / 2 - TrackpadPan.axisLock {
-                swiped = true
-                last = nil   // the pan is over here; lifting the fingers won't `end` it again
-                return phases + [.seeAll]
+            // When flicks are bound, let them resolve before firing a non-pan drag.
+            if config.drag != .pan {
+                if config.flicks.isEmpty {
+                    dragHandled = true
+                    return phases + (config.drag == .fire ? [.gesture(.fourFingerDrag)] : [])
+                }
+                pendingDrag = true
+            } else {
+                phases.append(.began)
             }
         }
+        if let origin = dragOrigin, landedTogether, now - dragBegan <= TrackpadPan.flickWindow,
+           let flick = flick(from: origin, to: centroid), config.flicks.contains(flick) {
+            // Still early enough to be a flick: the whole travel so far, straight and far enough. The
+            // pan it interrupts has moved the canvas a little; the gesture goes on from there.
+            swiped = true
+            pendingDrag = false
+            last = nil   // the pan is over here; lifting the fingers won't `end` it again
+            return phases + [.gesture(flick)]
+        }
+        if pendingDrag {
+            if now - dragBegan > TrackpadPan.flickWindow {
+                pendingDrag = false
+                dragHandled = true
+                last = nil
+                return config.drag == .fire ? [.gesture(.fourFingerDrag)] : []
+            }
+            last = centroid
+            return []
+        }
+        // Accumulate intentional cross-axis movement across frames: slow turns must work too.
         switch lock {
-        case .level: travel.dy = 0
-        case .plumb: travel.dx = 0
+        case .level:
+            guard config.freeSteering else { travel.dy = 0; break }
+            if abs(travel.dy) >= abs(travel.dx) * 0.5 { crossAxisTravel += travel.dy }
+            else { crossAxisTravel = 0 }
+            if abs(crossAxisTravel) >= 0.015 { lock = nil; travel.dy = crossAxisTravel; crossAxisTravel = 0 }
+            else { travel.dy = 0 }
+        case .plumb:
+            guard config.freeSteering else { travel.dx = 0; break }
+            if abs(travel.dx) >= abs(travel.dy) * 0.5 { crossAxisTravel += travel.dx }
+            else { crossAxisTravel = 0 }
+            if abs(crossAxisTravel) >= 0.015 { lock = nil; travel.dx = crossAxisTravel; crossAxisTravel = 0 }
+            else { travel.dx = 0 }
         case nil: break
         }
         phases.append(.changed(travel))
@@ -375,16 +425,31 @@ struct TrackpadRecognizer {
         return phases
     }
 
+    /// The flick a stroke from `origin` to `centroid` makes, if it is quick and straight enough. The
+    /// direction is the hand's: up is up the trackpad.
+    private func flick(from origin: CGPoint, to centroid: CGPoint) -> TrackpadGesture? {
+        let dx = centroid.x - origin.x
+        let dy = centroid.y - origin.y
+        guard hypot(dx, dy) >= TrackpadPan.swipeDistance else { return nil }
+        let angle = atan2(abs(dy), abs(dx))
+        if angle <= TrackpadPan.axisLock { return dx >= 0 ? .swipeRight : .swipeLeft }
+        if angle >= .pi / 2 - TrackpadPan.axisLock { return dy >= 0 ? .swipeUp : .swipeDown }
+        return nil
+    }
+
     mutating func reset() -> [TrackpadPan.Phase] {
-        let phases: [TrackpadPan.Phase] = last == nil ? [] : [.ended]
+        let phases: [TrackpadPan.Phase] = last == nil || pendingDrag ? [] : [.ended]
         device = nil
         fingers = []
         anchor = nil
         last = nil
         lock = nil
+        crossAxisTravel = 0
         stirred = false
         dragOrigin = nil
         swiped = false
+        dragHandled = false
+        pendingDrag = false
         landedTogether = false
         anchorSpread = 0
         return phases

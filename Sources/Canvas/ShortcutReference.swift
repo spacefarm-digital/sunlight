@@ -10,21 +10,33 @@ enum ShortcutReference {
         let keys: String
     }
 
-    /// The canvas, in the order you'd learn it.
-    static let canvasRows: [Row] = [
-        Row(title: "Zoom", keys: "pinch · ⌥ or ⌘ scroll"),
-        Row(title: "Pan", keys: "two-finger scroll · four-finger drag"),
-        Row(title: "Move a window", keys: "drag"),
-        Row(title: "Flip a window's pole", keys: "P · its ⊕/⊖ button"),
-        Row(title: "Enter where it is", keys: "click · pinch in"),
-        Row(title: "Centre and enter", keys: "double-click · ⏎"),
-        Row(title: "Use a window at 1:1", keys: "click"),
-        Row(title: "See everything", keys: "four-finger tap"),
-        Row(title: "Canvas ↔ last window", keys: "Mission Control key · four-finger tap"),
-        Row(title: "Jump to another window", keys: "hold Mission Control key, point, let go"),
-        Row(title: "Switch apps", keys: "⌘Tab · then ⌘← ⌘→"),
-        Row(title: "Switch the app's windows", keys: "⌘Tab, then ⌘` · ⌘↑ ⌘↓"),
-    ]
+    /// The canvas, in the order you'd learn it. Gestures and keys are read from `Bindings`, so a
+    /// rebound one shows here too.
+    static var canvasRows: [Row] {
+        let seeAll = gestureLine(for: .seeAll) ?? "—"
+        let desktop = [Bindings.shortcut(for: .showDesktop)?.label, gestureLine(for: .showDesktop)]
+            .compactMap { $0 }.joined(separator: " · ")
+        let zoom = [Settings.canvasPinchEnabled ? "pinch" : nil,
+                    Settings.canvasScrollBehavior == .zoom ? "two-finger scroll" : nil,
+                    Settings.scrollZoomModifier == .none ? nil : "\(Settings.scrollZoomModifier.title) + scroll"].compactMap { $0 }.joined(separator: " · ")
+        let pan = [Settings.canvasScrollBehavior == .pan ? "two-finger scroll" : nil,
+                   gestureLine(for: .panCanvas)].compactMap { $0 }.joined(separator: " · ")
+        return [
+            Row(title: "Zoom", keys: zoom.isEmpty ? "—" : zoom),
+            Row(title: "Pan", keys: pan.isEmpty ? "—" : pan),
+            Row(title: "Drag a window", keys: Settings.windowDragAction.title),
+            Row(title: "Flip a window's pole", keys: (Bindings.shortcut(for: .flipPolarity)?.label ?? "—") + " · its ⊕/⊖ button"),
+            Row(title: "Single-click a window", keys: Settings.windowClickAction(double: false).title),
+            Row(title: "Double-click a window", keys: Settings.windowClickAction(double: true).title),
+            Row(title: "Enter a window", keys: "pinch in · " + (Bindings.shortcut(for: .enterWindow)?.label ?? "—")),
+            Row(title: "Use a window at 1:1", keys: "click"),
+            Row(title: "See everything", keys: seeAll),
+            Row(title: "Canvas ↔ last window", keys: [Bindings.shortcut(for: .toggleCanvas)?.label, gestureLine(for: .toggleCanvas)].compactMap { $0 }.joined(separator: " · ")),
+            Row(title: "Show Desktop", keys: desktop.isEmpty ? "—" : desktop),
+            Row(title: "Switch apps", keys: "⌘Tab · then ⌘← ⌘→"),
+            Row(title: "Switch the app's windows", keys: "⌘Tab, then ⌘` · ⌘↑ ⌘↓"),
+        ]
+    }
 
     /// Sunlight's own commands, leaving out the experimental ones that are off (`Settings.arranging`,
     /// `Settings.stripModeEnabled`).
@@ -34,8 +46,8 @@ enum ShortcutReference {
 
     static func commandRows(arranging: Bool, strip: Bool, tellSunlight: Bool = false) -> [Row] {
         var rows = [
-            Row(title: "Save Layout…", keys: "⌘S"),
-            Row(title: "Restore a layout", keys: "⌘1 – ⌘9"),
+            Row(title: "Save Layout…", keys: Bindings.shortcut(for: .saveLayout)?.label ?? "—"),
+            Row(title: "Restore a layout", keys: Bindings.summary(Command.layoutCommands, default: "⌘1 – ⌘9")),
         ]
         if arranging {
             rows += [
@@ -44,18 +56,23 @@ enum ShortcutReference {
             ]
         }
         rows.append(Row(title: "Move & Resize a window", keys: TileMenu.tileKeysSummary))
-        rows.append(Row(title: "Picture in Picture", keys: "⌃⌥P · right-click"))
+        rows.append(Row(title: "Picture in Picture", keys: (Bindings.shortcut(for: .pictureInPicture)?.label ?? "—") + " · right-click"))
         if strip {
-            rows.append(Row(title: "Strip mode on or off", keys: "⌃⌥S · then ⌃⌥ arrows step"))
+            let key = Bindings.shortcut(for: .toggleStrip)?.label ?? "—"
+            rows.append(Row(title: "Strip mode on or off", keys: key + " · then the arrows step"))
         }
-        if tellSunlight {
-            rows.append(Row(title: "Tell Sunlight", keys: "⌃⌥Space"))
-        }
+        if tellSunlight { rows.append(Row(title: "Tell Sunlight", keys: Bindings.shortcut(for: .tellSunlight)?.label ?? "—")) }
+        let desktop = [Bindings.shortcut(for: .showDesktop)?.label, gestureLine(for: .showDesktop)]
+            .compactMap { $0 }.joined(separator: " · ")
         rows += [
-            Row(title: "Show Desktop", keys: "F11 · four-finger spread"),
-            Row(title: "Settings…", keys: "⌘,"),
-            Row(title: "How to Use", keys: "⌘?"),
+            Row(title: "Show Desktop", keys: desktop.isEmpty ? "—" : desktop),
+            Row(title: "Settings…", keys: Bindings.shortcut(for: .settings)?.label ?? "—"),
         ]
         return rows
+    }
+
+    /// The gesture that does a command now, in the words the Trackpad pane uses.
+    private static func gestureLine(for command: Command) -> String? {
+        Bindings.gesture(doing: command)?.how.lowercased()
     }
 }

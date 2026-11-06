@@ -4,7 +4,11 @@ import Foundation
 /// A global hotkey via Carbon's RegisterEventHotKey. Works without Accessibility permission
 /// and fires even while another app is frontmost — that's what makes "come back to the canvas" possible.
 final class Hotkey {
-    private static var registry: [UInt32: Hotkey] = [:]
+    private final class WeakHotkey {
+        weak var value: Hotkey?
+        init(_ value: Hotkey) { self.value = value }
+    }
+    private static var registry: [UInt32: WeakHotkey] = [:]
     private static var nextID: UInt32 = 1
     private static var handlerInstalled = false
 
@@ -16,7 +20,7 @@ final class Hotkey {
         self.callback = callback
         id = Hotkey.nextID
         Hotkey.nextID += 1
-        Hotkey.registry[id] = self
+        Hotkey.registry[id] = WeakHotkey(self)
         Hotkey.installHandlerIfNeeded()
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x4341_4E56) /* 'CANV' */, id: id)
@@ -42,7 +46,7 @@ final class Hotkey {
                               MemoryLayout<EventHotKeyID>.size,
                               nil,
                               &hotKeyID)
-            if let hotkey = Hotkey.registry[hotKeyID.id] {
+            if let hotkey = Hotkey.registry[hotKeyID.id]?.value {
                 let cb = hotkey.callback
                 Task { @MainActor in cb() }
             }
