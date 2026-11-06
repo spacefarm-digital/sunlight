@@ -72,9 +72,13 @@ enum Settings {
     private static let tidySpacingKey = "TidySpacing"
     private static let tidyOrderKey = "TidyOrder"
     private static let panInertiaKey = "CanvasPanInertia"
-    private static let seeAllGestureKey = "CanvasSeeAllGesture"
     private static let zoomInertiaKey = "CanvasZoomInertia"
     private static let snapToWindowsKey = "CanvasSnapToWindows"
+    private static let autoCenterAfterFourFingerPanKey = "autoCenterAfterFourFingerPan"
+    private static let singleClickBehaviorKey = "singleClickBehavior"
+    private static let doubleClickBehaviorKey = "doubleClickBehavior"
+    private static let windowSnapStrengthKey = "windowSnapStrength"
+    private static let cameraPanSensitivityKey = "cameraPanSensitivity"
     private static let rememberCanvasKey = "CanvasRemember"
     private static let otherWindowsKey = "CanvasOtherWindowsOnRestore"
     private static let switcherEdgeKey = "SwitcherEdge"
@@ -260,22 +264,281 @@ enum Settings {
 
     // MARK: Trackpad
 
-    /// The four-finger gesture that shows everything (and, done again on the canvas, goes back into
-    /// the last window), as the Mission Control key does. A tap leaves every four-finger drag a pan; a
-    /// swipe up, Mission Control's own gesture, takes the quick upward stroke from panning.
+    /// The four-finger gesture that shows everything, as the tutorial draws it. Settings › Trackpad
+    /// binds every gesture itself; this only answers which of its two pictures to play.
     enum SeeAllGesture: String, CaseIterable, Identifiable {
         case tap, swipeUp
         var id: Self { self }
         var title: String { self == .tap ? "Four-finger tap" : "Four-finger swipe up" }
         var how: String { self == .tap ? "Tap with four fingers" : "Swipe up with four fingers" }
     }
-    static let seeAllGestureDidChange = Notification.Name("SunlightSeeAllGestureDidChange")
     static var seeAllGesture: SeeAllGesture {
-        get { SeeAllGesture(rawValue: defaults.string(forKey: seeAllGestureKey) ?? "") ?? .tap }
+        get { Bindings.command(for: .fourFingerTap) == .seeAll ? .tap : .swipeUp }
         set {
-            defaults.set(newValue.rawValue, forKey: seeAllGestureKey)
-            NotificationCenter.default.post(name: seeAllGestureDidChange, object: nil)
+            if newValue == .tap {
+                Bindings.setGesture(.seeAll, for: .fourFingerTap)
+                Bindings.setGesture(nil, for: .swipeUp)
+            } else {
+                Bindings.setGesture(.seeAll, for: .swipeUp)
+                Bindings.setGesture(nil, for: .fourFingerTap)
+            }
         }
+    }
+
+    enum CameraPanSensitivity: String, CaseIterable {
+        case normal, high, veryHigh
+
+        var title: String {
+            switch self {
+            case .normal: return "Normal"
+            case .high: return "High"
+            case .veryHigh: return "Very High"
+            }
+        }
+
+        var multiplier: CGFloat {
+            switch self {
+            case .normal: return 1
+            case .high: return 1.35
+            case .veryHigh: return 1.6
+            }
+        }
+    }
+
+    static var cameraPanSensitivity: CameraPanSensitivity {
+        get { defaults.string(forKey: cameraPanSensitivityKey).flatMap(CameraPanSensitivity.init(rawValue:)) ?? .normal }
+        set { defaults.set(newValue.rawValue, forKey: cameraPanSensitivityKey) }
+    }
+
+    private static func sensitivity(_ key: String, default fallback: Double, range: ClosedRange<Double>) -> Double {
+        guard let stored = defaults.object(forKey: key) as? NSNumber else { return fallback }
+        let value = stored.doubleValue
+        guard value.isFinite else { return fallback }
+        return min(range.upperBound, max(range.lowerBound, value))
+    }
+
+    static var trackpadCameraSensitivity: Double {
+        get { sensitivity("TrackpadCameraSensitivity", default: 1, range: 0.25...3) }
+        set { defaults.set(min(3, max(0.25, newValue)), forKey: "TrackpadCameraSensitivity") }
+    }
+
+    static var mouseCameraSensitivity: Double {
+        get { sensitivity("MouseCameraSensitivity", default: 1, range: 0.25...3) }
+        set { defaults.set(min(3, max(0.25, newValue)), forKey: "MouseCameraSensitivity") }
+    }
+
+    static var windowCenteringSensitivity: Double {
+        get { sensitivity("WindowCenteringSensitivity", default: 1, range: 0.5...4) }
+        set { defaults.set(min(4, max(0.5, newValue)), forKey: "WindowCenteringSensitivity") }
+    }
+
+    static func resetCameraSensitivities() {
+        defaults.removeObject(forKey: "TrackpadCameraSensitivity")
+        defaults.removeObject(forKey: cameraPanSensitivityKey)
+        defaults.removeObject(forKey: "MouseCameraSensitivity")
+        defaults.removeObject(forKey: "WindowCenteringSensitivity")
+    }
+
+    /// Opt in to the alternative release-time snap and free steering; upstream behavior is the default.
+    static var snapOnPanRelease: Bool {
+        get { defaults.bool(forKey: "SnapOnPanRelease") }
+        set { defaults.set(newValue, forKey: "SnapOnPanRelease") }
+    }
+
+    static var freePanSteering: Bool {
+        get { defaults.bool(forKey: "FreePanSteering") }
+        set {
+            defaults.set(newValue, forKey: "FreePanSteering")
+            NotificationCenter.default.post(name: Bindings.didChange, object: nil)
+        }
+    }
+
+    static var autoCenterAfterFourFingerPan: Bool {
+        get { defaults.object(forKey: autoCenterAfterFourFingerPanKey) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: autoCenterAfterFourFingerPanKey) }
+    }
+
+    enum SingleClickBehavior: String, CaseIterable {
+        case centerWindow, enterAtClickPosition, none
+
+        var title: String {
+            switch self {
+            case .centerWindow: return "Center window"
+            case .enterAtClickPosition: return "Enter at click position"
+            case .none: return "Nothing"
+            }
+        }
+    }
+
+    static var singleClickBehavior: SingleClickBehavior {
+        get { defaults.string(forKey: singleClickBehaviorKey).flatMap(SingleClickBehavior.init(rawValue:)) ?? .enterAtClickPosition }
+        set { defaults.set(newValue.rawValue, forKey: singleClickBehaviorKey) }
+    }
+
+    /// Existing installations used the opposite of the single-click action for a double-click.
+    static var doubleClickBehavior: SingleClickBehavior {
+        get {
+            defaults.string(forKey: doubleClickBehaviorKey).flatMap(SingleClickBehavior.init(rawValue:))
+                ?? (singleClickBehavior == .enterAtClickPosition ? .centerWindow : .enterAtClickPosition)
+        }
+        set { defaults.set(newValue.rawValue, forKey: doubleClickBehaviorKey) }
+    }
+
+    enum WindowClickAction: Hashable {
+        case standard(SingleClickBehavior)
+        case command(Command)
+
+        var title: String {
+            switch self {
+            case .standard(let behavior): return behavior.title
+            case .command(let command): return command.menuTitle
+            }
+        }
+        static var choices: [WindowClickAction] {
+            SingleClickBehavior.allCases.map(WindowClickAction.standard)
+                + Command.allCases.filter { !$0.isMenuShortcut && !$0.isCanvasLocal && $0 != .panCanvas }.map(WindowClickAction.command)
+        }
+    }
+
+    static func windowClickAction(double: Bool) -> WindowClickAction {
+        let key = double ? "CanvasDoubleClickCommand" : "CanvasSingleClickCommand"
+        if let raw = defaults.string(forKey: key), let command = Command(rawValue: raw),
+           WindowClickAction.choices.contains(.command(command)) { return .command(command) }
+        return .standard(double ? doubleClickBehavior : singleClickBehavior)
+    }
+
+    static func setWindowClickAction(_ action: WindowClickAction, double: Bool) {
+        let key = double ? "CanvasDoubleClickCommand" : "CanvasSingleClickCommand"
+        switch action {
+        case .standard(let behavior):
+            defaults.removeObject(forKey: key)
+            if double { doubleClickBehavior = behavior } else { singleClickBehavior = behavior }
+        case .command(let command):
+            defaults.set(command.rawValue, forKey: key)
+        }
+    }
+
+    enum SecondaryClickAction: Hashable {
+        case contextMenu, none, command(Command)
+        var title: String {
+            switch self {
+            case .contextMenu: return "Context menu"
+            case .none: return "Nothing"
+            case .command(let command): return command.menuTitle
+            }
+        }
+        static var choices: [SecondaryClickAction] {
+            [.contextMenu, .none] + Command.allCases
+                .filter { !$0.isMenuShortcut && !$0.isCanvasLocal && $0 != .panCanvas }
+                .map(SecondaryClickAction.command)
+        }
+    }
+
+    static var secondaryClickAction: SecondaryClickAction {
+        get {
+            guard let raw = defaults.string(forKey: "CanvasSecondaryClickCommand") else { return .contextMenu }
+            if raw == "none" { return .none }
+            guard let command = Command(rawValue: raw), SecondaryClickAction.choices.contains(.command(command)) else { return .contextMenu }
+            return .command(command)
+        }
+        set {
+            switch newValue {
+            case .contextMenu: defaults.removeObject(forKey: "CanvasSecondaryClickCommand")
+            case .none: defaults.set("none", forKey: "CanvasSecondaryClickCommand")
+            case .command(let command): defaults.set(command.rawValue, forKey: "CanvasSecondaryClickCommand")
+            }
+        }
+    }
+
+    enum WindowDragAction: String, CaseIterable {
+        case moveWindow, panCanvas, none
+        var title: String {
+            switch self {
+            case .moveWindow: return "Move window"
+            case .panCanvas: return "Pan canvas"
+            case .none: return "Nothing"
+            }
+        }
+    }
+
+    static var windowDragAction: WindowDragAction {
+        get { defaults.string(forKey: "CanvasWindowDragAction").flatMap(WindowDragAction.init(rawValue:)) ?? .moveWindow }
+        set { defaults.set(newValue.rawValue, forKey: "CanvasWindowDragAction") }
+    }
+
+    enum ScrollBehavior: String, CaseIterable {
+        case pan, zoom, none
+        var title: String {
+            switch self {
+            case .pan: return "Pan canvas"
+            case .zoom: return "Zoom canvas"
+            case .none: return "Nothing"
+            }
+        }
+    }
+
+    static var canvasScrollBehavior: ScrollBehavior {
+        get { defaults.string(forKey: "CanvasScrollBehavior").flatMap(ScrollBehavior.init(rawValue:)) ?? .pan }
+        set { defaults.set(newValue.rawValue, forKey: "CanvasScrollBehavior") }
+    }
+
+    enum ScrollZoomModifier: String, CaseIterable {
+        case optionOrCommand, option, command, control, shift, none
+        var title: String {
+            switch self {
+            case .optionOrCommand: return "Option or Command"
+            case .option: return "Option"
+            case .command: return "Command"
+            case .control: return "Control"
+            case .shift: return "Shift"
+            case .none: return "None"
+            }
+        }
+        func matches(_ flags: NSEvent.ModifierFlags) -> Bool {
+            switch self {
+            case .optionOrCommand: return !flags.intersection([.option, .command]).isEmpty
+            case .option: return flags.contains(.option)
+            case .command: return flags.contains(.command)
+            case .control: return flags.contains(.control)
+            case .shift: return flags.contains(.shift)
+            case .none: return false
+            }
+        }
+    }
+
+    static var scrollZoomModifier: ScrollZoomModifier {
+        get { defaults.string(forKey: "CanvasScrollZoomModifier").flatMap(ScrollZoomModifier.init(rawValue:)) ?? .optionOrCommand }
+        set { defaults.set(newValue.rawValue, forKey: "CanvasScrollZoomModifier") }
+    }
+
+    static var canvasPinchEnabled: Bool {
+        get { defaults.object(forKey: "CanvasPinchEnabled") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "CanvasPinchEnabled") }
+    }
+
+    /// Whether zooming into a window automatically enters it, as in Sunlight 0.2.
+    static var enterOnZoom: Bool {
+        get { defaults.object(forKey: "CanvasEnterOnZoom") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "CanvasEnterOnZoom") }
+    }
+
+    static func resetTrackpadControls() {
+        for key in [singleClickBehaviorKey, doubleClickBehaviorKey, "CanvasSingleClickCommand",
+                    "CanvasDoubleClickCommand", "CanvasSecondaryClickCommand", "CanvasWindowDragAction", "CanvasScrollBehavior", "CanvasScrollZoomModifier", "CanvasPinchEnabled", "CanvasEnterOnZoom"] {
+            defaults.removeObject(forKey: key)
+        }
+        Bindings.resetGestures()
+    }
+
+    enum WindowSnapStrength: String, CaseIterable {
+        case strong, normal
+
+        var title: String { self == .strong ? "Strong" : "Normal" }
+    }
+
+    static var windowSnapStrength: WindowSnapStrength {
+        get { defaults.string(forKey: windowSnapStrengthKey).flatMap(WindowSnapStrength.init(rawValue:)) ?? .normal }
+        set { defaults.set(newValue.rawValue, forKey: windowSnapStrengthKey) }
     }
 
     // MARK: Inertia
@@ -1509,6 +1772,23 @@ private struct MotionPane: View {
                               detail: "Reduce Motion turns every effect into a fade.")
             }
             Section {
+                sensitivitySlider("Trackpad camera sensitivity", value: model.bind({ Settings.trackpadCameraSensitivity }, { Settings.trackpadCameraSensitivity = $0 }), range: 0.25...3, detail: "Controls trackpad navigation and precise scrolling.")
+                sensitivitySlider("Mouse camera sensitivity", value: model.bind({ Settings.mouseCameraSensitivity }, { Settings.mouseCameraSensitivity = $0 }), range: 0.25...3, detail: "Controls mouse navigation.")
+                Toggle(isOn: model.bind({ Settings.snapOnPanRelease }, { Settings.snapOnPanRelease = $0 })) {
+                    RowLabel(title: "Snap when fingers lift", subtitle: "Check for a window before the pan glides to a stop.")
+                }
+                Toggle(isOn: model.bind({ Settings.freePanSteering }, { Settings.freePanSteering = $0 })) {
+                    RowLabel(title: "Free four-finger steering", subtitle: "Change direction during a straight four-finger pan.")
+                }
+                Toggle(isOn: model.bind({ Settings.autoCenterAfterFourFingerPan }, { Settings.autoCenterAfterFourFingerPan = $0 })) {
+                    RowLabel(title: "Niri-like navigation", subtitle: "On four-finger release, enter the nearest window in the swipe direction.")
+                }
+                Picker("Window snap strength", selection: model.bind({ Settings.windowSnapStrength }, { Settings.windowSnapStrength = $0 })) {
+                    ForEach(Settings.WindowSnapStrength.allCases, id: \.self) { Text($0.title) }
+                }.disabled(!Settings.snapToWindows)
+                sensitivitySlider("Window centering sensitivity", value: model.bind({ Settings.windowCenteringSensitivity }, { Settings.windowCenteringSensitivity = $0 }), range: 0.5...4, detail: "Controls how readily windows are centered when you release.")
+                    .disabled(!Settings.snapToWindows)
+                Button("Restore Camera Sensitivity Defaults") { Settings.resetCameraSensitivities(); model.objectWillChange.send() }
                 Toggle(isOn: model.bind({ Settings.panInertia }, { Settings.panInertia = $0 })) {
                     RowLabel(title: "Inertia when panning",
                              subtitle: "Pans glide on after you let go.")
@@ -1537,6 +1817,19 @@ private struct MotionPane: View {
         }
         .formStyle(.grouped)
         .toggleStyle(.switch)
+    }
+
+    private func sensitivitySlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                RowLabel(title: title, subtitle: detail)
+                Spacer()
+                Text("\(Int((value.wrappedValue * 100).rounded()))%")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Slider(value: value, in: range, step: 0.05)
+        }
     }
 
     /// The stage's caption: the effect in a line.
@@ -1589,27 +1882,81 @@ private struct HowToUsePane: View {
 /// What the canvas does with the pointer, trackpad and keys (`ShortcutReference`): a list to read, not
 /// to change. Settings › How to use › Keyboard.
 struct ShortcutsPane: View {
+    /// Bumped when a key changes, so every row's field redraws from the store.
+    @State private var revision = 0
 
     var body: some View {
         Form {
             Section {
-                ForEach(ShortcutReference.canvasRows, id: \.title) { row in
-                    LabeledContent(row.title) { Text(row.keys).foregroundStyle(.secondary) }
-                }
+                rows(for: .moveAndResize)
             } header: {
-                SectionHeader(title: "Canvas")
+                SectionHeader(title: "Move & Resize",
+                              detail: "One window to a slot. They work from inside a window too, so they are global: a key another app already holds stays that app’s.")
+            }
+            if Settings.arranging {
+                Section {
+                    rows(for: .arrange)
+                } header: {
+                    SectionHeader(title: "Arrange",
+                                  detail: "The windows of one screen in columns, and everything tidied.")
+                }
             }
             Section {
-                ForEach(ShortcutReference.commandRows, id: \.title) { row in
-                    LabeledContent(row.title) { Text(row.keys).foregroundStyle(.secondary) }
-                }
+                rows(for: .displays)
             } header: {
-                SectionHeader(title: "Sunlight",
-                              detail: "⌃⌥ keys work inside windows too.")
+                SectionHeader(title: "Displays",
+                              detail: "A window to the next or previous display. With one display, or with Multiple displays off, they do nothing.")
+            }
+            Section {
+                rows(for: .canvas)
+            } header: {
+                SectionHeader(title: "Canvas",
+                              detail: "Strip Mode, See Everything and Show Desktop. Show Desktop is F11 by default; while Sunlight has taken over the Mac, its key tap hands F11 here, and puts it back when the key is changed.")
+            }
+            Section {
+                rows(for: .menus)
+            } header: {
+                SectionHeader(title: "Menus",
+                              detail: "These shortcuts work while a Sunlight window is active. Layout numbers follow the order of your saved layouts.")
+            }
+            Section {
+                HStack {
+                    Spacer()
+                    Button("Restore Default Keys") {
+                        Bindings.resetShortcuts()
+                        revision += 1
+                    }
+                    .disabled(Command.keyBindableCommands.allSatisfy { Bindings.shortcut(for: $0) == $0.defaultShortcut })
+                }
             }
         }
         .formStyle(.grouped)
         .toggleStyle(.switch)
+        .onReceive(NotificationCenter.default.publisher(for: Bindings.didChange)) { _ in revision += 1 }
+        .onReceive(NotificationCenter.default.publisher(for: Settings.experimentalFeaturesDidChange)) { _ in revision += 1 }
+    }
+
+    @ViewBuilder
+    private func rows(for group: Command.Group) -> some View {
+        ForEach(Command.allCases.filter { $0.group == group && $0.keyBindable }) { command in
+            LabeledContent {
+                ShortcutRecorder(command: command, shortcut: Bindings.shortcut(for: command)) { shortcut in
+                    Bindings.setShortcut(shortcut, for: command)
+                    revision += 1
+                }
+            } label: {
+                RowLabel(title: command.title, subtitle: subtitle(for: command))
+            }
+        }
+    }
+
+    private func subtitle(for command: Command) -> String? {
+        if command.isCanvasLocal { return "Works while the canvas is focused." }
+        if command.isMenuShortcut { return "Works while a Sunlight window is active." }
+        guard !command.isAvailable(arranging: Settings.arranging,
+                                   strip: Settings.stripModeEnabled,
+                                   displays: true) else { return nil }
+        return "Needs the feature turned on in General › Experimental."
     }
 }
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Configure shortcuts, trackpad gestures and camera sensitivity in Settings.
+- Optional release-time window centering, directional navigation and free four-finger steering.
+
 ## 0.2.5
 
 - A window put in macOS's own full screen (the green button's menu, View > Enter Full Screen, or the app itself) is no longer forgotten: it stays on the canvas as away, dashed in the minimap and listed in ⌘Tab, and picking it takes you to its full-screen Space. When it leaves full screen it comes back to its place and you're in it. ⌃← and ⌃→ go between the canvas and full-screen apps, as on the Mac.
