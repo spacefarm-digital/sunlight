@@ -43,6 +43,8 @@ enum SetupDiagnose {
         var date: Date
         /// `desktopsLine`: how many Desktops there are, per display.
         var desktops = ""
+        /// `stabilityLines`: safe mode, the last runs and stalls, and the newest crash reports.
+        var stability: [String] = []
     }
 
     static let journalLines = 80
@@ -73,6 +75,11 @@ enum SetupDiagnose {
         lines.append("== Live-windows helper ==")
         lines.append(facts.helper.trimmingCharacters(in: .whitespacesAndNewlines))
         lines.append("")
+        if !facts.stability.isEmpty {
+            lines.append("== Stability ==")
+            lines.append(contentsOf: facts.stability)
+            lines.append("")
+        }
         lines.append("== Setup journal (last \(journalLines) lines) ==")
         lines.append(journalTail(facts.journal))
         return lines.joined(separator: "\n") + "\n"
@@ -180,6 +187,20 @@ enum SetupDiagnose {
         return result.output
     }
 
+    /// The "== Stability ==" section: how the last runs ended, the stalls the watchdog caught, the newest
+    /// crash reports of Sunlight and of the Dock, and where the full log is. Reads files: off main.
+    nonisolated static func stabilityLines(defaults: UserDefaults = .standard) -> [String] {
+        CrashReports.collect()
+        var lines = Stability.reportLines(runs: Stability.runs(defaults), stalls: Stability.stalls(defaults),
+                                          safeMode: Stability.ownerInSafeMode(defaults),
+                                          stamp: stamp)
+        let crashes = CrashReports.recent("Sunlight", limit: 5) + CrashReports.recent("Dock", limit: 3)
+        lines.append("Crash reports, newest first (\(redactingHome(CrashReports.keptFolder.path))):")
+        lines.append(contentsOf: crashes.isEmpty ? ["  (none)"] : CrashReports.reportLines(crashes).map { "  " + $0 })
+        lines.append("Log: \(redactingHome(Log.fileURL.path)). It names apps and windows, so it isn't in this report; attach it to an issue only if you're happy to.")
+        return lines
+    }
+
     /// Everything, read from the Mac. Takes a moment: off the main thread.
     nonisolated static func gather(_ inputs: Inputs) -> Facts {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -200,7 +221,8 @@ enum SetupDiagnose {
                                               available: available, previewMode: inputs.previewMode, reload: reloadDescription()),
                      helper: helperStatus(),
                      inputs: inputs, journal: SetupJournal.read(), date: Date(),
-                     desktops: desktopsLine(Spaces.read()))
+                     desktops: desktopsLine(Spaces.read()),
+                     stability: stabilityLines())
     }
 
     /// Where a report goes: beside the setup journal, named by the minute.
@@ -216,7 +238,7 @@ enum SetupDiagnose {
             try report.write(to: url, atomically: true, encoding: .utf8)
             return url
         } catch {
-            NSLog("Diagnose: couldn't save the report — \(error.localizedDescription)")
+            Log.note("Diagnose: couldn't save the report — \(error.localizedDescription)")
             return nil
         }
     }
@@ -244,7 +266,7 @@ enum SetupDiagnose {
         NSPasteboard.general.setString(text, forType: .string)
         let alert = NSAlert()
         alert.messageText = "The diagnose report is on the clipboard"
-        var detail = "Paste it into an issue or a message. It lists this Mac's setup, the renderer, what the helper says and the setup log: no window titles, no pictures."
+        var detail = "Paste it into an issue or a message. It lists this Mac's setup, the renderer, what the helper says, recent crashes and stalls, and the setup log: no window titles, no pictures."
         if let url { detail += "\n\nSaved as \(url.lastPathComponent) in Sunlight's Application Support folder." }
         alert.informativeText = detail
         alert.addButton(withTitle: "OK")

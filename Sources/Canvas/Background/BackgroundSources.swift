@@ -119,7 +119,7 @@ final class PhotoPicker: NSObject, PHPickerViewControllerDelegate {
         // The file exists only for the length of the callback, so the copy happens inside it.
         _ = provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { url, error in
             let name = url.flatMap { try? BackgroundSources.importImage(from: $0) }
-            if name == nil { NSLog("Background: Photos picker gave no file (\(error?.localizedDescription ?? "no error"))") }
+            if name == nil { Log.note("Background: Photos picker gave no file (\(error?.localizedDescription ?? "no error"))") }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { completion?(name) }
             }

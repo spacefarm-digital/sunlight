@@ -52,6 +52,7 @@ final class TakeoverMode {
         self.canvas = canvas
         keyTap = KeyTap { [weak canvas] command in canvas?.handle(command) }
         watcher.onForeignActivation = { [weak canvas] app in canvas?.foreignActivation(app) }
+        watcher.onDockClickOnFrontApp = { [weak canvas] app in canvas?.dockClickOnFrontApp(app) }
         watcher.onAppGone = { [weak canvas] pid in canvas?.appGone(pid: pid) }
         watcher.onFocusedWindowChanged = { [weak canvas] pid, element in canvas?.focusedWindowChanged(pid: pid, element: element) }
         watcher.onWindowCreated = { [weak canvas] pid, element in canvas?.windowCreated(pid: pid, element: element) }
@@ -72,7 +73,7 @@ final class TakeoverMode {
             watcher.start()
             spaces.start()
             isRunning = true
-            NSLog("Takeover: light mode — keys and absorb only, nothing changed on the system")
+            Log.note("Takeover: light mode — keys and absorb only, nothing changed on the system")
             return
         }
         if isEnabled {
@@ -80,7 +81,7 @@ final class TakeoverMode {
             return
         }
         if defaults.bool(forKey: Keys.applied) {
-            NSLog("Takeover: found prefs left over from a previous run, restoring")
+            Log.note("Takeover: found prefs left over from a previous run, restoring")
             TakeoverMode.revertPrefs()
         }
     }
@@ -161,7 +162,7 @@ final class TakeoverMode {
         var changed = SystemPrefs.apply()
         if !retired.restore.isEmpty {
             changed.formUnion(SystemPrefs.restore(retired.restore))
-            NSLog("Takeover: gave back \(retired.restore.map { "\($0.0.domain) \($0.0.key)" }.joined(separator: ", ")), no longer part of takeover")
+            Log.note("Takeover: gave back \(retired.restore.map { "\($0.0.domain) \($0.0.key)" }.joined(separator: ", ")), no longer part of takeover")
         }
         if changed.contains(SystemPrefs.dock) { canvas?.releaseLiveWindowsForDockRestart() }
         let restarted = SystemPrefs.restart(domains: changed)
@@ -171,7 +172,7 @@ final class TakeoverMode {
         isRunning = true
         spaces.start()
         DispatchQueue.global(qos: .utility).async { LoginItem.register() }   // launchd round trips
-        NSLog("Takeover: on\(changed.isEmpty ? "" : " (changed \(changed.sorted().joined(separator: ", ")); restarted \(restarted.isEmpty ? "nothing" : restarted.joined(separator: ", ")))")")
+        Log.note("Takeover: on\(changed.isEmpty ? "" : " (changed \(changed.sorted().joined(separator: ", ")); restarted \(restarted.isEmpty ? "nothing" : restarted.joined(separator: ", ")))")")
     }
 
     /// Sunlight switched off in the menu bar: the keys go back to the Mac (⌘Tab is the Mac's switcher
@@ -185,7 +186,7 @@ final class TakeoverMode {
         keyTap.stop()
         watcher.stop()
         spaces.stop()
-        NSLog("Takeover: keys and watching suspended")
+        Log.note("Takeover: keys and watching suspended")
     }
 
     func resumeInput() {
@@ -194,7 +195,7 @@ final class TakeoverMode {
         keyTap.start()
         watcher.start()
         spaces.start()
-        NSLog("Takeover: keys and watching resumed")
+        Log.note("Takeover: keys and watching resumed")
     }
 
     func revert(reason: Reason) {
@@ -207,15 +208,15 @@ final class TakeoverMode {
         switch reason {
         case .logout:
             TakeoverMode.revertPrefs(restarting: false)
-            NSLog("Takeover: logging out; the Mac's own values are back on disk, and the next login takes over again")
+            Log.note("Takeover: logging out; the Mac's own values are back on disk, and the next login takes over again")
         case .userQuit:
             TakeoverMode.revertPrefs()
-            NSLog("Takeover: off (still opted in)")
+            Log.note("Takeover: off (still opted in)")
         case .leaveMode:
             TakeoverMode.revertPrefs()
             LoginItem.unregister()
             defaults.set(false, forKey: Keys.enabled)
-            NSLog("Takeover: released")
+            Log.note("Takeover: released")
         }
     }
 
@@ -295,7 +296,7 @@ final class TakeoverMode {
             completion()
             return
         }
-        NSLog("Startup: quitting \(running.count) other Sunlight instance(s)")
+        Log.note("Startup: quitting \(running.count) other Sunlight instance(s)")
         running.forEach { $0.terminate() }
         let deadline = Date().addingTimeInterval(2)
         func poll() {
@@ -303,7 +304,7 @@ final class TakeoverMode {
                 completion()
             } else if Date() >= deadline {
                 let stuck = otherInstances()
-                NSLog("Startup: \(stuck.count) did not quit in 2 s — killing")
+                Log.note("Startup: \(stuck.count) did not quit in 2 s — killing")
                 stuck.forEach { $0.forceTerminate() }
                 completion()
             } else {

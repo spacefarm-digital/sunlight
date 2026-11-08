@@ -42,19 +42,19 @@ enum NewWindowMenu {
     /// every step is a round trip to the app. False if it has no such item or the press didn't go through.
     static func press(pid: pid_t, pick: ([Item]) -> Int? = NewWindowMenu.best) -> Bool {
         guard let menu = items(pid: pid), let i = pick(menu.items) else { return false }
-        NSLog("Open Here: pressing “\(menu.items[i].title)”")
+        Log.note("Open Here: pressing “\(menu.items[i].title)”")
         return AXUIElementPerformAction(menu.elements[i], kAXPressAction as CFString) == .success
     }
 
     /// Whether the app's ⌘N makes a window (`windowCommandN`). Off the main thread, as `press`.
     static func commandNMakesWindow(pid: pid_t) -> Bool {
         guard let menu = items(pid: pid) else {
-            NSLog("New window: pid \(pid)'s menu bar couldn't be read")
+            Log.note("New window: pid \(pid)'s menu bar couldn't be read")
             return false
         }
-        if let i = windowCommandN(menu.items) { NSLog("New window: pid \(pid)'s ⌘N is “\(menu.items[i].title)”"); return true }
+        if let i = windowCommandN(menu.items) { Log.note("New window: pid \(pid)'s ⌘N is “\(menu.items[i].title)”"); return true }
         let n = menu.items.filter { $0.key == "N" }.map { "“\($0.title)” ⌘only \($0.commandOnly) enabled \($0.enabled)" }
-        NSLog("New window: pid \(pid): \(menu.items.count) menu items, none a window's ⌘N; N items: \(n)")
+        Log.note("New window: pid \(pid): \(menu.items.count) menu items, none a window's ⌘N; N items: \(n)")
         return false
     }
 

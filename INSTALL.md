@@ -84,7 +84,9 @@ Settings › Live Windows has the steps done (its ⓘ names the ones left) and a
 wizard did and what the helper answered. **Diagnose…** there, or on the Welcome back and Load pages,
 copies a plain-text report to the clipboard and saves it beside the log: the Mac's facts, every setup
 step, the renderer, what the helper says about the add-on, and the log's tail. No window titles or
-pictures, so it can go straight into an issue. From Terminal:
+pictures, so it can go straight into an issue. Its Stability section lists how the last runs ended, the
+stalls Sunlight's watchdog caught, and the newest crash reports of Sunlight and the Dock. The full log is
+~/Library/Logs/Sunlight/Sunlight.log; it names apps and windows, so attach it only if you're happy to. From Terminal:
 
 ```
 /Applications/Sunlight.app/Contents/MacOS/Sunlight --renderer-status

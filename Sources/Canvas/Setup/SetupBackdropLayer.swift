@@ -151,7 +151,7 @@ final class SetupBackdropLayer: CAMetalLayer {
             state = try device.makeRenderPipelineState(descriptor: descriptor)
             commandQueue = device.makeCommandQueue()
         } catch {
-            NSLog("Setup: backdrop shader failed to compile: \(error)")
+            Log.note("Setup: backdrop shader failed to compile: \(error)")
         }
     }
 
@@ -336,7 +336,7 @@ final class SetupBackdropView: NSView {
             backdrop = metal
             return metal
         }
-        NSLog("Setup: no Metal backdrop; showing the still gradient")
+        Log.note("Setup: no Metal backdrop; showing the still gradient")
         let still = CALayer()
         still.contentsGravity = .resizeAspectFill
         return still

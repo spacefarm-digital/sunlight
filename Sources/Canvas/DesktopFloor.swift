@@ -147,7 +147,7 @@ final class DesktopFloor {
             source.resume()
             watch = source
         } else {
-            NSLog("Desktop: can't watch ~/Desktop (\(String(cString: strerror(errno)))); the floor refreshes on its own clock")
+            Log.note("Desktop: can't watch ~/Desktop (\(String(cString: strerror(errno)))); the floor refreshes on its own clock")
         }
         let refresh: @Sendable (Notification) -> Void = { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshSoon() }
@@ -208,7 +208,7 @@ final class DesktopFloor {
         let elements = icons.map(\.element)
         AXQueue.interactive.async {
             let error = AXUIElementSetAttributeValue(group.element, kAXSelectedChildrenAttribute as CFString, elements as CFArray)
-            if error != .success { NSLog("Desktop: couldn't select on Finder's desktop (\(error.rawValue))") }
+            if error != .success { Log.note("Desktop: couldn't select on Finder's desktop (\(error.rawValue))") }
         }
         refreshSoon()
     }
@@ -349,7 +349,7 @@ final class DesktopFloor {
     private func report(_ state: Reported, _ message: String) {
         guard reported != state else { return }
         reported = state
-        NSLog("Desktop: \(message)")
+        Log.note("Desktop: \(message)")
     }
 }
 

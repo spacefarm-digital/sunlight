@@ -239,7 +239,7 @@ enum LayoutStore {
         do {
             return try decoder.decode(type, from: data)
         } catch {
-            NSLog("Layout: can't read \(url.path) — \(error)")
+            Log.note("Layout: can't read \(url.path) — \(error)")
             return nil
         }
     }
@@ -254,7 +254,7 @@ enum LayoutStore {
             try encoder.encode(value).write(to: url, options: .atomic)
             return true
         } catch {
-            NSLog("Layout: can't write \(url.path) — \(error)")
+            Log.note("Layout: can't write \(url.path) — \(error)")
             return false
         }
     }
@@ -343,19 +343,19 @@ enum SavedList {
     static func read<T: Decodable>(_ type: T.Type, from url: URL, decoder: JSONDecoder = JSONDecoder()) -> (items: [T], intact: Bool) {
         guard FileManager.default.fileExists(atPath: url.path) else { return ([], true) }
         guard let data = try? Data(contentsOf: url) else {
-            NSLog("Saved: can't open \(url.path)")
+            Log.note("Saved: can't open \(url.path)")
             return ([], false)
         }
         let entries: [Lossy<T>]
         do {
             entries = try decoder.decode([Lossy<T>].self, from: data)
         } catch {
-            NSLog("Saved: can't read \(url.path) — \(error)")
+            Log.note("Saved: can't read \(url.path) — \(error)")
             return ([], false)
         }
         let items = entries.compactMap(\.value)
         if items.count < entries.count {
-            NSLog("Saved: \(entries.count - items.count) of \(entries.count) entries in \(url.lastPathComponent) can't be read; the rest are used")
+            Log.note("Saved: \(entries.count - items.count) of \(entries.count) entries in \(url.lastPathComponent) can't be read; the rest are used")
         }
         return (items, items.count == entries.count)
     }
@@ -372,10 +372,10 @@ enum SavedList {
             .appendingPathComponent("\(stem) (unreadable \(formatter.string(from: date))).\(url.pathExtension)")
         do {
             try FileManager.default.copyItem(at: url, to: copy)
-            NSLog("Saved: kept \(url.lastPathComponent) as \(copy.lastPathComponent) before writing over it")
+            Log.note("Saved: kept \(url.lastPathComponent) as \(copy.lastPathComponent) before writing over it")
             return copy
         } catch {
-            NSLog("Saved: couldn't keep a copy of \(url.path) (\(error.localizedDescription)); not writing over it")
+            Log.note("Saved: couldn't keep a copy of \(url.path) (\(error.localizedDescription)); not writing over it")
             return nil
         }
     }

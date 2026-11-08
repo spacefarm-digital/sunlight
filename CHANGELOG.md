@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.4
+
+- Clicking the Dock icon of the app already in front (after clicking into one of its windows at a zoom, or with Focus follows the pointer) takes the camera to its window.
+- A window its app closes but keeps alive behind the scenes (Music's and Calendar's main windows, some Settings windows) leaves the canvas and ⌘Tab like any closed window, instead of staying behind as an empty frame.
+- When macOS doesn't put Sunlight in the Accessibility or Screen Recording list by itself, Allow Accessibility… and Allow Screen Recording… show a card beside System Settings with Sunlight's icon to drag into the list, and a hand that shows where to drop it.
+- After Sunlight reloads the Dock add-on by itself at launch, the menu bar icon and menu no longer say setup is unfinished (#10).
+- Settings > Canvas has a Zoom level switch: turn it off to hide the zoom percentage in the top-left corner.
+- Stability: Sunlight keeps a log you can read at ~/Library/Logs/Sunlight/Sunlight.log, notes any moment it stops responding, and keeps its and the Dock's crash reports; Diagnose sums them up, still without window titles. If Sunlight crashes or is force quit, takeover's changes and Stage Manager are put back straight away, as a quit would, and after two crashes in a row soon after opening it starts the next time in safe mode (no takeover, no live windows) for that launch. Nothing leaves your Mac.
+- A window title with a % in it can no longer crash Sunlight.
+
 ## 0.2.3
 
 - Clicking an app in the Dock, or switching to it with ⌘Tab or Spotlight, always takes the camera to its window. Apps slow to answer (Electron apps, or focus on a panel) no longer leave the camera where it was or bring the canvas straight back, and an app with a window on the canvas and another minimized goes into the one on the canvas.

@@ -504,10 +504,13 @@ final class CanvasView: NSView {
         hudPerf.fontSize = 10
         hudPerf.actions = ["position": NSNull(), "contents": NSNull()]
         hudPerf.bounds = CGRect(x: 0, y: 0, width: 720, height: 13)
-        hudPerf.isHidden = !perf.enabled
         layer?.addSublayer(hudPerf)
         if perf.enabled {
             perf.onSummary = { [weak self] line in self?.hudPerf.string = line }
+        }
+        zoomReadoutSettingChanged()
+        NotificationCenter.default.addObserver(forName: Settings.zoomReadoutDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.zoomReadoutSettingChanged() }
         }
         background = Settings.background(for: effectiveAppearance)
         applyBackground()
@@ -515,6 +518,17 @@ final class CanvasView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Settings › Canvas › Zoom level: the readout in the top-left corner, and the `PerfLog` line under
+    /// it, shown or hidden together.
+    func zoomReadoutSettingChanged() {
+        let on = Settings.showZoomReadout
+        hudZoom.isHidden = !on
+        hudPerf.isHidden = !on || !perf.enabled
+    }
+
+    /// Whether the zoom readout is on screen, for tests.
+    var zoomReadoutShown: Bool { !hudZoom.isHidden }
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -1825,7 +1839,7 @@ final class CanvasView: NSView {
             let joined = [Member(proxy: push.proxy, from: push.from)] + push.members.map { Member(proxy: $0.proxy, from: $0.from) }
             m.members += joined
             m.joined += joined
-            NSLog("Polarity: \(push.proxy.appName) — \(push.proxy.title) bonded with \(m.proxy.appName) — \(m.proxy.title)")
+            Log.note("Polarity: \(push.proxy.appName) — \(push.proxy.title) bonded with \(m.proxy.appName) — \(m.proxy.title)")
         }
         m.pushes.removeAll { push in arrived.contains { $0.proxy === push.proxy } }
         // The clack of magnets meeting, while the hand still has the one they met.
@@ -2974,7 +2988,7 @@ final class CanvasView: NSView {
 
     override func magnify(with event: NSEvent) {
         guard cameraIsFree else {
-            if event.phase == .began { NSLog("Pinch: dropped, the canvas isn't key and no window is in use where it's drawn") }
+            if event.phase == .began { Log.note("Pinch: dropped, the canvas isn't key and no window is in use where it's drawn") }
             return
         }
         let pinchPoint = topLeftPoint(event)
@@ -3122,7 +3136,7 @@ extension CanvasView: NSDraggingSource {
             return item
         }
         guard !items.isEmpty else { return }
-        NSLog("Desktop: dragging \(items.count) file\(items.count == 1 ? "" : "s") off the desktop")
+        Log.note("Desktop: dragging \(items.count) file\(items.count == 1 ? "" : "s") off the desktop")
         springTarget = nil
         sprung = false
         let session = beginDraggingSession(with: items, event: event, source: self)
@@ -3143,7 +3157,7 @@ extension CanvasView: NSDraggingSource {
         springTimer = nil
         springTarget = nil
         setHovered(nil)
-        NSLog("Desktop: the files' drag ended (\(operation.isEmpty ? "nothing took them" : "dropped"))")
+        Log.note("Desktop: the files' drag ended (\(operation.isEmpty ? "nothing took them" : "dropped"))")
         onFileDragEnded?()
         desktopFloor?.refreshSoon()   // a move takes them off the desktop
     }

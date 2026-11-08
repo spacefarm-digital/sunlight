@@ -107,6 +107,29 @@ final class CanvasController {
     /// The last entered window, kept while it's off screen (native full screen), asked once whether
     /// it's minimized instead.
     private var askedKept: CGWindowID?
+    /// Windows their app closed that the window server still lists on screen, and when Accessibility was
+    /// last asked whether they're back. Music's last window, closed, stayed ordered in at alpha 1 while
+    /// Accessibility listed no window for the app (2026-11-08): its proxy, chrome and all, stayed on the
+    /// canvas and in ⌘Tab, and ⌘Tab to it activated Music with nothing to show. These are off the canvas
+    /// as any closed window is, until the app names them again or the window server lets them go.
+    /// Music doesn't always leave it on screen: it may order the closed window out and keep it, alive and
+    /// in no app's list. A window off screen that still exists would otherwise pass for the last entered
+    /// window gone full screen, kept for good; so these count as closed while the window server has them
+    /// at all, on screen or not, with their app (`pid`) to ask.
+    /// `home`: where the window was natively before `closeForApp` moved it off the screen, for it to go
+    /// back to when its app shows it again (or Sunlight quits), so it never reopens off the screen.
+    private var closedByApp: [CGWindowID: (pid: pid_t, asked: CFTimeInterval, home: CGPoint?)] = [:]
+    private var askingClosed: Set<CGWindowID> = []
+    /// When the app in front last had its windows on the canvas looked over for ones it closed
+    /// (`sweepFrontApp`), and whether that look is still under way.
+    private var frontSweptAt: CFTimeInterval = 0
+    private var frontSweeping = false
+    /// How often the app in front is looked over.
+    static let frontSweepInterval: CFTimeInterval = 1.5
+    /// Where the sweeps ask: their own queue, so an app slow to answer holds up nothing else.
+    private static let sweepQueue = DispatchQueue(label: "canvas.ax.sweep", qos: .utility)
+    /// How often a window closed by its app but still listed is looked up again in its app's windows.
+    static let closedRecheck: CFTimeInterval = 2
     /// The window we handed off to; nil while the canvas is in front.
     private var activeProxy: WindowProxy? { didSet { if (oldValue == nil) != (activeProxy == nil) { updateMinimap() } } }
     private var lastActiveProxy: WindowProxy?
@@ -519,6 +542,12 @@ final class CanvasController {
                 self?.scheduleDiff(after: 1.5)   // the first window comes well after the launch
             }
         }
+        workspace.addObserver(forName: NSWorkspace.didDeactivateApplicationNotification, object: nil, queue: .main) { [weak self] n in
+            let pid = (n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
+            MainActor.assumeIsolated {
+                if let pid { self?.appDeactivated(pid) }
+            }
+        }
         workspace.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] n in
             let pid = (n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
             MainActor.assumeIsolated {
@@ -585,7 +614,8 @@ final class CanvasController {
     func configureRenderer(_ asked: Settings.Renderer) {
         // Live windows on another display's canvas need an add-on that holds a lease per canvas; with an
         // older one the lead has the add-on and the others show captured pictures.
-        let requested = asked == .realWindows && !isLead
+        // Safe mode (`Stability`): pictures only, this launch, with nothing scheduled to try live windows again.
+        let requested = Stability.safeMode || asked == .realWindows && !isLead
             && (desk?.lead.additionNumber ?? 0) < LiveWindowsWire.leasePerCanvas ? Settings.Renderer.capture : asked
         rendererRevision += 1
         let revision = rendererRevision
@@ -612,16 +642,16 @@ final class CanvasController {
                 self.liveTimer?.invalidate(); self.liveTimer = nil
                 if available {
                     self.liveSince = Date()
-                    NSLog("Rendering: scaled real windows (live-window protocol v1, add-on \(version ?? "?"))")
+                    Log.note("Rendering: scaled real windows (live-window protocol v1, add-on \(version ?? "?"))")
                     self.lowerStrays()
                     if self.additionOutdated {
                         // Still usable, with what it has (an older handoff can show a frame in between);
                         // the one in this build goes into the Dock once, with the password prompt if need be.
-                        NSLog("Rendering: the Dock runs add-on \(version ?? "?"), this build carries \(LiveWindowsWire.additionVersion); reloading it")
+                        Log.note("Rendering: the Dock runs add-on \(version ?? "?"), this build carries \(LiveWindowsWire.additionVersion); reloading it")
                         self.reloadAddition()
                     }
                 } else {
-                    if requested == .realWindows { NSLog("Rendering: addition unavailable or incompatible; using capture proxies") }
+                    if requested == .realWindows { Log.note("Rendering: addition unavailable or incompatible; using capture proxies") }
                     self.enableCaptureFallback()
                     // Takeover may have restarted the Dock before the canvas was up to see it happen.
                     if requested == .realWindows {
@@ -647,7 +677,7 @@ final class CanvasController {
 
     private func fallBackFromRealWindows(_ reason: String) {
         guard renderer == .realWindows else { return }
-        NSLog("Rendering: live-window connection failed — \(reason); restoring and falling back")
+        Log.note("Rendering: live-window connection failed — \(reason); restoring and falling back")
         resetPipShapes()
         view.cancelAnimation()
         handingOff = false
@@ -678,7 +708,7 @@ final class CanvasController {
     static let liveRecoveryMaxDelay: TimeInterval = 30
 
     private func scheduleLiveRecovery() {
-        guard isLead, Settings.renderer == .realWindows, renderer != .realWindows else { return }
+        guard isLead, Settings.renderer == .realWindows, renderer != .realWindows, !Stability.safeMode else { return }
         liveRecoveryTimer?.invalidate()
         let delay = min(CanvasController.liveRecoveryMaxDelay, pow(2, Double(liveRecoveryAttempts)))
         let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
@@ -700,8 +730,9 @@ final class CanvasController {
             return
         }
         let revision = rendererRevision
+        let safeMode = Stability.safeMode
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let available = LiveWindowsConnection.probe()
+            let available = !safeMode && LiveWindowsConnection.probe()
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, self.rendererRevision == revision, Settings.renderer == .realWindows,
@@ -711,7 +742,7 @@ final class CanvasController {
                         self.scheduleLiveRecovery()
                         return
                     }
-                    NSLog("Rendering: the live-window addition answers again; back to scaled real windows")
+                    Log.note("Rendering: the live-window addition answers again; back to scaled real windows")
                     self.configureRenderer(.realWindows)
                 }
             }
@@ -732,6 +763,7 @@ final class CanvasController {
     /// Whether the menu's Reload Live Windows… has something to do: live windows wanted, not running.
     var canReloadLiveWindows: Bool {
         Settings.renderer == .realWindows && (renderer != .realWindows || additionOutdated) && !configuringRenderer && !reloading
+            && !Stability.safeMode
     }
     /// The add-on answering in the Dock is older than the one this build carries (`configureRenderer`).
     private var additionOutdated = false
@@ -746,18 +778,22 @@ final class CanvasController {
         // Not by itself in preview mode, nor on a Mac that can't load the add-on yet (SIP on, or no boot
         // argument): the load would fail and only leave an administrator prompt or a Login Items request
         // behind. Set Up Sunlight loads when the person asks.
+        if !interactive, Stability.safeMode {
+            Log.note("Rendering: not loading the live-window addition by itself (safe mode)")
+            return
+        }
         if !interactive, Settings.previewMode || !SetupStatus.liveWindowsPossible() {
-            NSLog("Rendering: not loading the live-window addition by itself (\(Settings.previewMode ? "preview mode" : "SIP or the boot argument isn't set"))")
+            Log.note("Rendering: not loading the live-window addition by itself (\(Settings.previewMode ? "preview mode" : "SIP or the boot argument isn't set"))")
             return
         }
         if interactive { _ = reloader.claimPrompt() }
         reloading = true
-        NSLog("Rendering: loading the live-window addition into the Dock\(interactive ? " (administrator prompt)" : "")")
+        Log.note("Rendering: loading the live-window addition into the Dock\(interactive ? " (administrator prompt)" : "")")
         Task { @MainActor [weak self] in
             guard let self else { return }
             let outcome = await self.reloader.reload(interactive: interactive, asked: interactive && asked)
             self.reloading = false
-            NSLog("Rendering: reload \(outcome.description)")
+            Log.note("Rendering: reload \(outcome.description)")
             // Asked for from the menu: a failure is said, not only logged.
             if interactive, outcome != .loaded, !outcome.description.contains("(-128)") {   // -128: cancelled
                 if let failure {
@@ -787,7 +823,7 @@ final class CanvasController {
         if isLead, !configuringRenderer { desk?.leadRendererSettled() }
         if renderer == .realWindows, !Settings.liveWindowsEverLoaded {
             Settings.liveWindowsEverLoaded = true
-            NSLog("Rendering: live windows loaded for the first time on this Mac; preview mode is over")
+            Log.note("Rendering: live windows loaded for the first time on this Mac; preview mode is over")
             // Only after a preview was seen this launch: an upgrade already on live windows says nothing.
             if previewShown { CanvasToast.show("This is the real thing: your live windows.", in: overlay) }
         }
@@ -895,15 +931,15 @@ final class CanvasController {
     /// `app` nil: an activation that took the front but isn't reported yet, held for the same way.
     private func holdThroughForeignFront(_ app: NSRunningApplication?) {
         if let app {
-            NSLog("Canvas: \(app.localizedName ?? "pid \(app.processIdentifier)") came forward to be sent back — the windows stay on the canvas")
+            Log.note("Canvas: \(app.localizedName ?? "pid \(app.processIdentifier)") came forward to be sent back — the windows stay on the canvas")
         } else {
-            NSLog("Canvas: deactivated for an app not yet reported — the windows stay on the canvas for now")
+            Log.note("Canvas: deactivated for an app not yet reported — the windows stay on the canvas for now")
         }
         foreignFrontHeldUntil = CACurrentMediaTime() + CanvasController.foreignFrontHold
         DispatchQueue.main.asyncAfter(deadline: .now() + CanvasController.foreignFrontHold) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, !NSApp.isActive, !self.staysUp, self.realWindowsPresented else { return }
-                NSLog("Canvas: still not back in front — handing the windows back")
+                Log.note("Canvas: still not back in front — handing the windows back")
                 self.foreignFrontHeldUntil = 0
                 self.suspendRealWindows(keepingLook: true)
             }
@@ -1073,7 +1109,7 @@ final class CanvasController {
                                                        pinned: handoffTarget.flatMap { t in candidates.firstIndex { $0 === t } })
             if !loggedFrameCap {
                 loggedFrameCap = true
-                NSLog("Rendering: \(candidates.count) windows on the canvas, more than the add-on takes in one frame (\(LiveWindowsWire.maxWindows)); the ones nearest the view are live, the rest wait under the backdrop")
+                Log.note("Rendering: \(candidates.count) windows on the canvas, more than the add-on takes in one frame (\(LiveWindowsWire.maxWindows)); the ones nearest the view are live, the rest wait under the backdrop")
             }
             candidates = keep.map { candidates[$0] }
         }
@@ -1291,7 +1327,7 @@ final class CanvasController {
         if !NSApp.isActive || activeProxy != nil || NSWorkspace.shared.frontmostApplication?.processIdentifier != myPID { forceFront() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self, !NSApp.isActive else { return }
-            NSLog("Sunlight: still not active 300 ms after show()")
+            Log.note("Sunlight: still not active 300 ms after show()")
             // ⌘Tab is waiting on the canvas, or an app on its way took the front back; don't leave the
             // user stranded in the window.
             if self.switcher != nil || self.frontTakenBack() { self.forceFront() }
@@ -1329,7 +1365,7 @@ final class CanvasController {
             MainActor.assumeIsolated {
                 guard let self, self.frontTakenBack() else { return }
                 let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
-                NSLog("Sunlight: \(front) took the front back while the canvas was on its way — coming back")
+                Log.note("Sunlight: \(front) took the front back while the canvas was on its way — coming back")
                 self.show()
             }
         }
@@ -1338,7 +1374,7 @@ final class CanvasController {
     private func forceFront() {
         let err = forceSunlightFront()
         window.orderFrontRegardless()
-        if err != noErr { NSLog("Sunlight: SetFrontProcess failed (\(err))") }
+        if err != noErr { Log.note("Sunlight: SetFrontProcess failed (\(err))") }
     }
 
     /// Brings the canvas back from wherever the user is; optionally frames everything once it's up.
@@ -1358,7 +1394,7 @@ final class CanvasController {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] app, error in
-            if let error { NSLog("Launch: \(name) failed — \(error.localizedDescription)") }
+            if let error { Log.note("Launch: \(name) failed — \(error.localizedDescription)") }
             guard let app else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.expectArrival(of: app, name: name) }
@@ -1423,11 +1459,11 @@ final class CanvasController {
         openingHere = OpenHere(name: app.name, bundleID: bundleID, pid: pid, spot: spot, enter: enter, known: known,
                             deadline: Date().addingTimeInterval(CanvasController.launchWait))
         guard let running, !known.isEmpty else {
-            NSLog("Open Here: \(running == nil ? "launching" : "reopening") \(app.name) at \(spot)")
+            Log.note("Open Here: \(running == nil ? "launching" : "reopening") \(app.name) at \(spot)")
             open(appAt: app.url, name: app.name)
             return
         }
-        NSLog("Open Here: asking \(app.name) for a new window at \(spot)")
+        Log.note("Open Here: asking \(app.name) for a new window at \(spot)")
         let pidValue = running.processIdentifier
         AXQueue.interactive.async { [weak self] in
             let pressed = NewWindowMenu.press(pid: pidValue)
@@ -1440,7 +1476,7 @@ final class CanvasController {
                             MainActor.assumeIsolated { self?.openHereFallback(pid: pidValue) }
                         }
                     } else {
-                        NSLog("Open Here: \(app.name) has no New Window item")
+                        Log.note("Open Here: \(app.name) has no New Window item")
                         self.openHereFallback(pid: pidValue)
                     }
                 }
@@ -1455,13 +1491,13 @@ final class CanvasController {
         openingHere = nil
         guard NSApp.isActive, activeProxy == nil, !handingOff, restoring == nil, !Settings.stripMode else { return }
         if let back = pending.returnTo {
-            NSLog("New window: none came from \(pending.name) — back into \(back.title)")
+            Log.note("New window: none came from \(pending.name) — back into \(back.title)")
             if proxies[back.windowID] === back { handoff(to: back) } else { dropHeldKeys() }
             return
         }
         let windows = view.proxies.filter { $0.kind == .window && $0.pid == pid }
         guard let p = mru.lazy.compactMap({ id in windows.first { $0.windowID == id } }).first ?? windows.last else {
-            NSLog("Open Here: \(pending.name) has no window on the canvas to bring over")
+            Log.note("Open Here: \(pending.name) has no window on the canvas to bring over")
             return
         }
         view.release(p)   // moved on its own: it leaves its group
@@ -1469,7 +1505,7 @@ final class CanvasController {
         let gap = Tidy.Spacing.normal.points(gap: Settings.tileGap)
         let to = NewWindowSpot.spot(size: p.worldRect.size, avoiding: others, view: view.camera.toWorld(visibleTopLeft),
                                     gap: gap, target: pending.spot)
-        NSLog("Open Here: no new window from \(pending.name) — bringing \(p.title) over, \(p.worldRect.origin) → \(to.origin)")
+        Log.note("Open Here: no new window from \(pending.name) — bringing \(p.title) over, \(p.worldRect.origin) → \(to.origin)")
         p.tile = nil
         view.bringToFront(p)
         view.glide([(p, to.origin)], duration: CanvasView.cameraDuration)
@@ -1527,7 +1563,7 @@ final class CanvasController {
         let inFront = NSApp.isActive && activeProxy == nil
         switch phase {
         case .seeAll:
-            NSLog("Pan: four-finger See All")
+            Log.note("Pan: four-finger See All")
             // A flick was a drag until this moment: the pan stops where it is, without coasting.
             if inFront, pendingPan == nil { view.trackpadPanCancelled() }
             pendingPan = nil
@@ -1538,10 +1574,10 @@ final class CanvasController {
             // All, not back again. On the canvas, either gesture again goes back into the last window.
             if fromWindow || !NSApp.isActive { showCanvas(fitAll: true) } else { toggle() }
         case .spread:
-            NSLog("Pan: four-finger spread")
+            Log.note("Pan: four-finger spread")
             showDesktop()
         case .began:
-            NSLog("Pan: four-finger drag\(inFront ? "" : ", bringing the canvas back")")
+            Log.note("Pan: four-finger drag\(inFront ? "" : ", bringing the canvas back")")
             pendingPan = nil
             panBroughtCanvas = !inFront
             if !inFront {
@@ -1556,7 +1592,7 @@ final class CanvasController {
             } else {
                 // Something took the front mid-drag (typically the activation of a window just handed
                 // off to, landing late). The drag still wants the canvas.
-                NSLog("Pan: lost the front mid-drag, bringing the canvas back")
+                Log.note("Pan: lost the front mid-drag, bringing the canvas back")
                 pendingPan = travel
                 show()
             }
@@ -1594,7 +1630,7 @@ final class CanvasController {
         guard desktopShown == nil else { return }
         closeSwitcher(clearHighlight: true)
         desktopShown = view.targetCamera ?? view.camera
-        NSLog("Desktop: showing the desktop\(desktopFloor.windowID == nil ? " (no floor: Finder isn't drawing the desktop)" : "")")
+        Log.note("Desktop: showing the desktop\(desktopFloor.windowID == nil ? " (no floor: Finder isn't drawing the desktop)" : "")")
         view.setShowsDesktop(true)
         // The minimap sits over the desktop's bottom-right corner, where Finder's icons start: it steps
         // out with `desktopShown` set (`updateMinimap`).
@@ -1612,7 +1648,7 @@ final class CanvasController {
     func endShowDesktop(flyBack: Bool) {
         guard let before = desktopShown else { return }
         desktopShown = nil
-        NSLog("Desktop: back from the desktop")
+        Log.note("Desktop: back from the desktop")
         view.setShowsDesktop(false)
         if flyBack { view.animateCamera(to: before) }
     }
@@ -1628,7 +1664,7 @@ final class CanvasController {
     private func desktopPlacementChanged(animated changed: Bool) {
         filesPlacement = Settings.desktopFilesPlacement
         widgetsPlacement = Settings.widgetsPlacement
-        if changed { NSLog("Desktop: files \(filesPlacement.title) (\(filesPlacement.stored)), widgets \(widgetsPlacement.title) (\(widgetsPlacement.stored))") }
+        if changed { Log.note("Desktop: files \(filesPlacement.title) (\(filesPlacement.stored)), widgets \(widgetsPlacement.title) (\(widgetsPlacement.stored))") }
         arrangeDesktop(animated: changed, force: true)
         minimap.redraw()
     }
@@ -1697,7 +1733,7 @@ final class CanvasController {
     func toggleDesktopFloor() {
         let shown = !Settings.showDesktopFloor
         Settings.showDesktopFloor = shown
-        NSLog("Desktop: the floor is \(shown ? "on" : "off")")
+        Log.note("Desktop: the floor is \(shown ? "on" : "off")")
         for c in deskCanvases {
             c.desktopFloor.isEnabled = shown
             if shown { c.scheduleDiff() }
@@ -1788,11 +1824,11 @@ final class CanvasController {
     private func openFiles(_ urls: [URL], with app: URL? = nil) {
         guard !urls.isEmpty else { return }
         endShowDesktop(flyBack: false)
-        NSLog("Desktop: opening \(urls.map(\.lastPathComponent).joined(separator: ", "))\(app.map { " with \($0.lastPathComponent)" } ?? "")")
+        Log.note("Desktop: opening \(urls.map(\.lastPathComponent).joined(separator: ", "))\(app.map { " with \($0.lastPathComponent)" } ?? "")")
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         let arrived: @Sendable (NSRunningApplication?, Error?) -> Void = { [weak self] running, error in
-            if let error { NSLog("Desktop: couldn't open — \(error.localizedDescription)") }
+            if let error { Log.note("Desktop: couldn't open — \(error.localizedDescription)") }
             guard let running else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.expectArrival(of: running) }
@@ -1812,10 +1848,10 @@ final class CanvasController {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    if let error { NSLog("Desktop: couldn't move to the Trash — \(error.localizedDescription)") }
+                    if let error { Log.note("Desktop: couldn't move to the Trash — \(error.localizedDescription)") }
                     let moves = trashed.map { (from: $0.key, to: $0.value) }   // original → in the Trash
                     if !moves.isEmpty {
-                        NSLog("Desktop: moved \(moves.count) item\(moves.count == 1 ? "" : "s") to the Trash")
+                        Log.note("Desktop: moved \(moves.count) item\(moves.count == 1 ? "" : "s") to the Trash")
                         self.registerFileUndo(moves, name: "Move to Trash")
                     }
                     self.desktopFloor.select([])
@@ -1849,11 +1885,11 @@ final class CanvasController {
                 let target = url.deletingLastPathComponent().appendingPathComponent(name)
                 do {
                     try FileManager.default.moveItem(at: url, to: target)
-                    NSLog("Desktop: renamed \(old) to \(name)")
+                    Log.note("Desktop: renamed \(old) to \(name)")
                     self.registerFileUndo([(from: url, to: target)], name: "Rename")
                     self.desktopFloor.select(urls: [target])
                 } catch {
-                    NSLog("Desktop: couldn't rename \(old) — \(error.localizedDescription)")
+                    Log.note("Desktop: couldn't rename \(old) — \(error.localizedDescription)")
                     NSAlert(error: error).beginSheetModal(for: self.window, completionHandler: nil)
                 }
             }
@@ -1871,11 +1907,11 @@ final class CanvasController {
         let url = folder.appendingPathComponent(DesktopFiles.untitledFolderName(existing: existing))
         do {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
-            NSLog("Desktop: new folder \(url.lastPathComponent)")
+            Log.note("Desktop: new folder \(url.lastPathComponent)")
             desktopFloor.select(urls: [url])
             rename(url)
         } catch {
-            NSLog("Desktop: couldn't make a folder — \(error.localizedDescription)")
+            Log.note("Desktop: couldn't make a folder — \(error.localizedDescription)")
             NSAlert(error: error).beginSheetModal(for: window, completionHandler: nil)
         }
     }
@@ -1891,7 +1927,7 @@ final class CanvasController {
                         try FileManager.default.moveItem(at: move.to, to: move.from)
                         undone.append((from: move.to, to: move.from))
                     } catch {
-                        NSLog("Desktop: couldn't undo \(name) of \(move.from.lastPathComponent) — \(error.localizedDescription)")
+                        Log.note("Desktop: couldn't undo \(name) of \(move.from.lastPathComponent) — \(error.localizedDescription)")
                     }
                 }
                 controller.registerFileUndo(undone, name: name)
@@ -1908,7 +1944,7 @@ final class CanvasController {
     /// windows during a drag, so the window can't come above the canvas until the drop; stepping aside
     /// is what gets the drop to it (measured on 27.2).
     private func springInto(_ p: WindowProxy, around point: CGPoint) {
-        NSLog("Desktop: the dragged files open \(p.appName) — \(p.title)")
+        Log.note("Desktop: the dragged files open \(p.appName) — \(p.title)")
         springDrag = true
         handoff(to: p, placement: .inPlace(around: point))
     }
@@ -1987,7 +2023,7 @@ final class CanvasController {
         guard paused != self.paused else { return }
         self.paused = paused
         if paused {
-            NSLog("Sunlight: off")
+            Log.note("Sunlight: off")
             view.cancelAnimation()
             closeSwitcher(clearHighlight: true)
             if isShowingDesktop { endShowDesktop(flyBack: false) }
@@ -1999,7 +2035,7 @@ final class CanvasController {
             // under takeover) shows nothing.
             if NSApp.isActive { NSApp.hide(nil) }
         } else {
-            NSLog("Sunlight: on")
+            Log.note("Sunlight: on")
             NSApp.unhideWithoutActivation()
             dormancyChanged(dormancy.asleep)
             if showing { show() }
@@ -2009,6 +2045,10 @@ final class CanvasController {
 
     /// Quitting.
     func shutdown() {
+        // Windows their apps closed that the canvas moved off the screen go back where they were, so the
+        // app shows them there when it reopens them. One still on screen (kept ordered in) stays put:
+        // back where it was, it would show, closed, over the desktop.
+        for (id, entry) in closedByApp where !WindowList.isOnScreen(id) { bringHome(id, entry.home) }
         configuringRenderer = true
         rendererRevision += 1
         liveTimer?.invalidate(); liveTimer = nil
@@ -2101,7 +2141,7 @@ final class CanvasController {
     private func listNow() {
         guard !configuringRenderer, !asleep, isUp, activeProxy == nil, !handingOff, addingWidgets == nil, !deskEditing else { return }
         listingGeneration += 1
-        reconcile(with: WindowList.queue.sync { WindowList.onScreen() })
+        reconcile(with: Watchdog.during("the window list (WindowList.onScreen)") { WindowList.queue.sync { WindowList.onScreen() } })
     }
 
     /// The window server says a window appeared. On the live canvas it is listed at once, and then every frame
@@ -2121,7 +2161,7 @@ final class CanvasController {
             if announced.count > 64 { announced = announced.filter { CACurrentMediaTime() - $0.value < 10 } }
             let state = renderer != .realWindows ? "capture mode" : !NSApp.isActive ? "the canvas isn't active"
                 : activeProxy != nil ? "a window is entered" : asleep ? "asleep" : "the live canvas"
-            NSLog("Window events: window \(id) announced on \(state)")
+            Log.note("Window events: window \(id) announced on \(state)")
         }
         if id != 0, activeProxy != nil || pendingAbsorbPID != 0, !NSApp.isActive, takesInFront {
             hideArrival(id)
@@ -2184,7 +2224,10 @@ final class CanvasController {
                                                   && display.frame.contains(CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)) },
                      visibleWorld: view.camera.toWorld(CGRect(origin: .zero, size: view.bounds.size)),
                      zoom: view.camera.zoom)
+        recheckClosedByApp(listed: list)
+        sweepFrontApp()
         let wanted = list.filter {
+            if closedByApp[$0.id] != nil { return false }
             if renderer == .realWindows, let p = proxies[$0.id], p.pid == $0.pid { return true }
             // Each window is on one display's canvas (`Desk.owner`).
             return (isCanvasMaterial($0) || isWidget($0)) && (desk?.canvas(forWindow: $0.id, frame: $0.bounds) ?? self) === self
@@ -2206,11 +2249,13 @@ final class CanvasController {
         }
         var gone = 0
         for (id, p) in proxies where !wantedIDs.contains(id) {
-            if p.kind == .window, let why = knownAway(p) {
+            // Closed as far as its app is concerned, whatever the window server still lists: not away,
+            // and not the last entered window kept for full screen either.
+            if closedByApp[id] == nil, p.kind == .window, let why = knownAway(p) {
                 putAway(p, why)
                 continue
             }
-            if id == keep {
+            if id == keep, closedByApp[id] == nil {
                 if askedKept != id {
                     askedKept = id
                     askMinimized(p)
@@ -2218,7 +2263,7 @@ final class CanvasController {
                 continue
             }
             // Still there but off screen: minimized, or on another Space. Accessibility says which.
-            if p.kind == .window, WindowList.exists(id) {
+            if p.kind == .window, closedByApp[id] == nil, WindowList.exists(id) {
                 putAway(p, nil)
                 continue
             }
@@ -2266,7 +2311,7 @@ final class CanvasController {
 
         let new = wantedIDs.subtracting(proxies.keys).subtracting(unstreamable.keys)
         if gone > 0 || !moved.isEmpty || !new.isEmpty {
-            NSLog("Sync: \(list.count) on screen, \(wanted.count) wanted, +\(new.count) −\(gone), \(moved.count) moved\(moved.isEmpty ? "" : " (\(moved.joined(separator: "; ")))")\(new.isEmpty || renderer == .realWindows ? "" : " → asking ScreenCaptureKit")")
+            Log.note("Sync: \(list.count) on screen, \(wanted.count) wanted, +\(new.count) −\(gone), \(moved.count) moved\(moved.isEmpty ? "" : " (\(moved.joined(separator: "; ")))")\(new.isEmpty || renderer == .realWindows ? "" : " → asking ScreenCaptureKit")")
         }
         if renderer == .realWindows {
             var created: [WindowProxy] = []
@@ -2305,9 +2350,9 @@ final class CanvasController {
             // or the entrance's next tick.
             for p in created where p.kind == .window {
                 if let t = announced.removeValue(forKey: p.windowID) {
-                    NSLog("Sync: window \(p.windowID) (\(p.appName)) taken \(Int((CACurrentMediaTime() - t) * 1000)) ms after its announcement")
+                    Log.note("Sync: window \(p.windowID) (\(p.appName)) taken \(Int((CACurrentMediaTime() - t) * 1000)) ms after its announcement")
                 } else {
-                    NSLog("Sync: window \(p.windowID) (\(p.appName)) taken without an announcement")
+                    Log.note("Sync: window \(p.windowID) (\(p.appName)) taken without an announcement")
                 }
             }
             if arriving, created.contains(where: { $0.kind == .window }) { updateRealWindows() }
@@ -2344,7 +2389,7 @@ final class CanvasController {
         }
         orderMismatches += 1
         if orderMismatches == 5 {
-            NSLog("Rendering: the window server's order keeps differing from the one asserted; reasserting it with every listing")
+            Log.note("Rendering: the window server's order keeps differing from the one asserted; reasserting it with every listing")
         }
         fullFrameNeeded = true
         updateRealWindows()
@@ -2393,7 +2438,7 @@ final class CanvasController {
             // listing keeps, and nothing here needs it.
             content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         } catch {
-            NSLog("Sync: shareable content failed — Screen Recording permission? (\(error))")
+            Log.note("Sync: shareable content failed — Screen Recording permission? (\(error))")
             fullSyncRequested.formUnion(requested)
             return
         }
@@ -2433,7 +2478,7 @@ final class CanvasController {
         for id in missing { unstreamable[id, default: 0] += 1 }
         let retry = missing.filter { unstreamable[$0, default: 0] < 3 }
         if created > 0 || !missing.isEmpty {
-            NSLog("Sync: ScreenCaptureKit lists \(content.windows.count), created \(created), missing \(missing.count)\(retry.isEmpty ? "" : ", asking again")")
+            Log.note("Sync: ScreenCaptureKit lists \(content.windows.count), created \(created), missing \(missing.count)\(retry.isEmpty ? "" : ", asking again")")
         }
         // ScreenCaptureKit lags window creation by a beat: ask again shortly, a few times, then let it be.
         if !retry.isEmpty { requestFullSync(for: retry, after: 0.5) }
@@ -2495,7 +2540,7 @@ final class CanvasController {
         }.map(\.windowID))
         let listOnly = lastWantedIDs.subtracting(sck), sckOnly = sck.subtracting(lastWantedIDs)
         if !listOnly.isEmpty || !sckOnly.isEmpty {
-            NSLog("Sync: sources differ — window list only: \(listOnly.sorted()), ScreenCaptureKit only: \(sckOnly.sorted())")
+            Log.note("Sync: sources differ — window list only: \(listOnly.sorted()), ScreenCaptureKit only: \(sckOnly.sorted())")
         }
     }
 
@@ -2591,7 +2636,7 @@ final class CanvasController {
         parent.attachedChildren.append(child)
         if view.isClosing(parent) { view.cancelExit(parent) }   // "save changes?": the app kept it
         view.bringToFront(parent)   // the child above it
-        NSLog("Attached: \(child.appName) — \(child.title) hangs from \(parent.title) at offset (\(Int(child.attachmentOffset.x)), \(Int(child.attachmentOffset.y)))")
+        Log.note("Attached: \(child.appName) — \(child.title) hangs from \(parent.title) at offset (\(Int(child.attachmentOffset.x)), \(Int(child.attachmentOffset.y)))")
     }
 
     /// Among windows that just showed up, the ones that hang from a window of their app (`attachmentParent`),
@@ -2640,7 +2685,7 @@ final class CanvasController {
             if let parent = attachmentParent(for: native, pid: c.pid, excluding: c.windowID) {
                 attach(c, to: parent, native: native)
             } else {
-                NSLog("Attached: \(c.appName) — \(c.title) stands alone now that \(p.title) is gone")
+                Log.note("Attached: \(c.appName) — \(c.title) stands alone now that \(p.title) is gone")
             }
         }
     }
@@ -2670,7 +2715,7 @@ final class CanvasController {
         let groupingBefore = view.grouping
         p.polarity = pole
         if let restoring { view.restoreGrouping(restoring) } else { view.release(p) }
-        NSLog("Polarity: \(p.appName) — \(p.title) is now \(pole.glyph)")
+        Log.note("Polarity: \(p.appName) — \(p.title) is now \(pole.glyph)")
         minimap.redraw()
         rememberSoon()
         if let undo = window.undoManager {
@@ -2742,7 +2787,7 @@ final class CanvasController {
         guard !view.groupMembers(of: p).isEmpty else { return }
         let distance = hypot(p.worldRect.minX - before.x, p.worldRect.minY - before.y)
         guard distance > Settings.tileGap else { return }
-        NSLog("Polarity: \(p.appName) — \(p.title) moved \(Int(distance)) pt for real; it leaves its group")
+        Log.note("Polarity: \(p.appName) — \(p.title) moved \(Int(distance)) pt for real; it leaves its group")
         view.release(p)
         rememberSoon()
     }
@@ -2793,7 +2838,7 @@ final class CanvasController {
                 MainActor.assumeIsolated {
                     guard let self, let p = self.proxies[id], p.kind == .widget else { return }
                     if let widget { p.adopt(widget: widget) }
-                    NSLog("Widget: \(p.appName) — \(p.title) at \(p.lastRealFrame.integral)\(widget.map { " (\($0.identifier))" } ?? ", no Accessibility")")
+                    Log.note("Widget: \(p.appName) — \(p.title) at \(p.lastRealFrame.integral)\(widget.map { " (\($0.identifier))" } ?? ", no Accessibility")")
                 }
             }
         }
@@ -2871,7 +2916,7 @@ final class CanvasController {
             removeWidget(p)
             return
         }
-        NSLog("Close: \(p.appName) — \(p.title)")
+        Log.note("Close: \(p.appName) — \(p.title)")
         guard !view.isClosing(p) else { return }
         if NSApp.isActive, activeProxy == nil { quietAfterCloseUntil = Date().addingTimeInterval(CanvasController.closeQuiet) }
         // The closing effect first, then the press: once the app has closed the window there is nothing
@@ -2883,10 +2928,25 @@ final class CanvasController {
             self?.pressClose(p)
         }
         // Still here well after the press: the app kept it, with a sheet or none.
+        // Unless the app no longer names it: closed, though the window server still has it (Music's last
+        // window, Calendar's main one), and it goes as a closed window does (`closeForApp`).
         DispatchQueue.main.asyncAfter(deadline: .now() + CanvasController.closeKeptAfter) { [weak self] in
             guard let self, let q = self.proxies[id], q === p, self.view.isClosing(q) else { return }
-            NSLog("Close: \(p.appName) — \(p.title) is still open; bringing it back")
-            self.view.cancelExit(q)
+            let pid = q.pid, handle = q.ax
+            CanvasController.sweepQueue.async { [weak self] in
+                // The handle the ✕ was pressed through, dead, and the app naming the window no more: both,
+                // so an app answering with an empty list never takes a window still asking "save changes?".
+                let dead = handle?.isDestroyed ?? true
+                let named = dead ? AXWindow.names(windowID: id, pid: pid) : true
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self, let q = self.proxies[id], q === p, self.view.isClosing(q) else { return }
+                        if named == false { return self.closeForApp(q) }
+                        Log.note("Close: \(p.appName) — \(p.title) is still open; bringing it back")
+                        self.view.cancelExit(q)
+                    }
+                }
+            }
         }
     }
 
@@ -2905,7 +2965,7 @@ final class CanvasController {
                     guard let self else { return }
                     if let ax, let p = self.proxies[id], p.ax == nil { p.ax = ax }
                     guard ax != nil, closed else {
-                        NSLog(ax == nil ? "Close: no AX window for \(name) — Accessibility granted?"
+                        Log.note(ax == nil ? "Close: no AX window for \(name) — Accessibility granted?"
                                         : "Close: \(name) — \(title) has no close button, or the app refused")
                         if let p = self.proxies[id] { self.view.cancelExit(p) }
                         return
@@ -2933,7 +2993,7 @@ final class CanvasController {
     /// it takes no hover and no controls (`WindowProxy.leaving`).
     func minimize(_ p: WindowProxy) {
         guard p.kind == .window, proxies[p.windowID] === p, !p.leaving else { return }
-        NSLog("Minimize: \(p.appName) — \(p.title)")
+        Log.note("Minimize: \(p.appName) — \(p.title)")
         let known = p.ax, id = p.windowID, pid = p.pid, approx = p.lastRealFrame, name = p.appName
         p.leaving = true
         view.dropHover(of: p)
@@ -2944,7 +3004,7 @@ final class CanvasController {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     guard done else {
-                        NSLog("Minimize: \(name) refused, or no AX window — Accessibility granted?")
+                        Log.note("Minimize: \(name) refused, or no AX window — Accessibility granted?")
                         self.proxies[id]?.leaving = false
                         return
                     }
@@ -2958,7 +3018,7 @@ final class CanvasController {
 
     /// Right-click › Hide: the window's app, as ⌘H would. Its windows keep their places.
     func hideApp(of p: WindowProxy) {
-        NSLog("Hide: \(p.appName)")
+        Log.note("Hide: \(p.appName)")
         NSRunningApplication(processIdentifier: p.pid)?.hide()
         resync(after: [0.2, 0.7])
     }
@@ -2982,7 +3042,7 @@ final class CanvasController {
         view.remove(p)
         p.away = why
         away[id] = p
-        if let why { NSLog("Away: \(p.appName) — \(p.title) \(why)") } else { askMinimized(p) }
+        if let why { Log.note("Away: \(p.appName) — \(p.title) \(why)") } else { askMinimized(p) }
         showAway()
     }
 
@@ -3005,7 +3065,7 @@ final class CanvasController {
         p.leaving = false
         proxies[id] = p
         view.add(p, arriving: arriving)
-        if let was { NSLog("Away: \(p.appName) — \(p.title) back from \(was)") }
+        if let was { Log.note("Away: \(p.appName) — \(p.title) back from \(was)") }
         showAway()
         if revealOnReturn == id {
             revealOnReturn = nil
@@ -3022,7 +3082,7 @@ final class CanvasController {
         let shown = visible.intersection(p.worldRect)
         let mostlyIn = !shown.isNull && shown.width * shown.height >= p.worldRect.width * p.worldRect.height / 2
         guard !mostlyIn else { return }
-        NSLog("Away: \(p.appName) — \(p.title) is back out of view — over to it")
+        Log.note("Away: \(p.appName) — \(p.title) is back out of view — over to it")
         view.fly(to: camera(centring: CGPoint(x: p.worldRect.midX, y: p.worldRect.midY)))
     }
 
@@ -3072,7 +3132,7 @@ final class CanvasController {
         if let p = away[id], p.away == nil {
             if minimized {
                 p.away = .minimized
-                NSLog("Away: \(p.appName) — \(p.title) minimized")
+                Log.note("Away: \(p.appName) — \(p.title) minimized")
                 showAway()
             } else {
                 away[id] = nil   // on another Space: off the canvas, as before
@@ -3093,7 +3153,7 @@ final class CanvasController {
     /// the window taken out of the Dock (a click on its dashed outline in the minimap, the switcher, the Mission Control key).
     func bringBack(_ p: WindowProxy) {
         guard away[p.windowID] === p, let why = p.away, NSApp.isActive, activeProxy == nil, !handingOff else { return }
-        NSLog("Away: bringing back \(p.appName) — \(p.title) from \(why)")
+        Log.note("Away: bringing back \(p.appName) — \(p.title) from \(why)")
         let id = p.windowID, pid = p.pid, known = p.ax, approx = p.lastRealFrame
         switch why {
         case .hidden:
@@ -3180,7 +3240,7 @@ final class CanvasController {
             guard let self else { return }
             self.fetchingWidgetHandles = false
             guard let content else {
-                NSLog("Widgets: no ScreenCaptureKit handles — Screen Recording permission?")
+                Log.note("Widgets: no ScreenCaptureKit handles — Screen Recording permission?")
                 return
             }
             var found = 0
@@ -3190,7 +3250,7 @@ final class CanvasController {
                 p.refresh()   // a widget that doesn't change sends its stream nothing
                 found += 1
             }
-            if found > 0 { NSLog("Widgets: streaming \(found) on the live-windows backdrop") }
+            if found > 0 { Log.note("Widgets: streaming \(found) on the live-windows backdrop") }
             self.streamWidgets()
         }
     }
@@ -3212,7 +3272,7 @@ final class CanvasController {
         guard p.kind == .widget else { return }
         let widget = axWidget(for: p)
         if let worldPoint, let widget, widget.press(at: p.realPoint(forWorld: worldPoint)) {
-            NSLog("Widget: pressed a control in \(p.appName) — \(p.title)")
+            Log.note("Widget: pressed a control in \(p.appName) — \(p.title)")
             return
         }
         // A widget's container app may be a stub with nothing to show — Batteries is tagged hidden, like
@@ -3223,10 +3283,10 @@ final class CanvasController {
               (bundle.object(forInfoDictionaryKey: "SBAppTags") as? [String])?.contains("hidden") != true,
               bundle.object(forInfoDictionaryKey: "LSUIElement") as? Bool != true,
               bundle.object(forInfoDictionaryKey: "LSBackgroundOnly") as? Bool != true else {
-            NSLog("Widget: \(p.appName) — \(p.title) has no app to open\(widget == nil ? " (Accessibility granted?)" : "")")
+            Log.note("Widget: \(p.appName) — \(p.title) has no app to open\(widget == nil ? " (Accessibility granted?)" : "")")
             return
         }
-        NSLog("Widget: \(p.appName) — \(p.title) opens \(url.lastPathComponent)")
+        Log.note("Widget: \(p.appName) — \(p.title) opens \(url.lastPathComponent)")
         open(appAt: url, name: url.deletingPathExtension().lastPathComponent)
     }
 
@@ -3234,13 +3294,13 @@ final class CanvasController {
     /// widget's window gone.
     private func removeWidget(_ p: WindowProxy) {
         guard let widget = axWidget(for: p) else {
-            NSLog("Close: no Accessibility element for widget \(p.appName) — Accessibility granted?")
+            Log.note("Close: no Accessibility element for widget \(p.appName) — Accessibility granted?")
             return
         }
-        NSLog("Close: widget \(p.appName) — \(p.title)")
+        Log.note("Close: widget \(p.appName) — \(p.title)")
         widget.remove { [weak self] removed in
             guard removed else {
-                NSLog("Close: no “Remove Widget” in the menu of \(p.appName) — \(p.title)")
+                Log.note("Close: no “Remove Widget” in the menu of \(p.appName) — \(p.title)")
                 return
             }
             self?.resync(after: [0.2, 0.7, 1.5])
@@ -3257,20 +3317,20 @@ final class CanvasController {
     func addWidgets() {
         guard addingWidgets == nil else { return }
         guard AXIsProcessTrusted() else {
-            NSLog("Widgets: adding widgets needs Accessibility")
+            Log.note("Widgets: adding widgets needs Accessibility")
             NSSound.beep()
             return
         }
         closeSwitcher(clearHighlight: true)
         let widget = proxies.values.lazy.filter { $0.kind == .widget }.compactMap { self.axWidget(for: $0) }.first
-        NSLog("Widgets: opening the gallery from \(widget.map { "the \($0.name) widget's menu" } ?? "Finder's desktop menu")")
+        Log.note("Widgets: opening the gallery from \(widget.map { "the \($0.name) widget's menu" } ?? "Finder's desktop menu")")
         // Syncing stops from here: once edit mode clears the screen, a sync would drop every window's proxy.
         addingWidgets = AddingWidgets()
         suspendRealWindows()
         WidgetGallery.open(from: widget) { [weak self] opened in
             guard let self else { return }
             guard opened else {
-                NSLog("Widgets: couldn't open the gallery — no widget on the desktop to ask, and Finder isn't drawing the desktop")
+                Log.note("Widgets: couldn't open the gallery — no widget on the desktop to ask, and Finder isn't drawing the desktop")
                 self.addingWidgets = nil
                 NSSound.beep()
                 return
@@ -3311,7 +3371,7 @@ final class CanvasController {
         if state.gallery == nil { state.gallery = gallery }
         if galleryUp && state.galleryShown == nil {
             state.galleryShown = Date()
-            NSLog("Widgets: gallery up")
+            Log.note("Widgets: gallery up")
         }
         let canvasUp = WidgetGallery.isOnScreen(CGWindowID(window.windowNumber))
         if !canvasUp && !state.orderedOut { state.canvasHidden = true }
@@ -3325,14 +3385,14 @@ final class CanvasController {
             finishAddingWidgets("the gallery never came up")
         } else if let shown = state.galleryShown, galleryUp, canvasUp, !state.orderedOut, -shown.timeIntervalSinceNow > 1 {
             // Edit mode is meant to clear the screen. If the canvas is still covering the desktop, step aside.
-            NSLog("Widgets: edit mode left the canvas up — ordering it out")
+            Log.note("Widgets: edit mode left the canvas up — ordering it out")
             addingWidgets?.orderedOut = true
             window.orderOut(nil)
         }
     }
 
     private func finishAddingWidgets(_ reason: String) {
-        NSLog("Widgets: back from the gallery (\(reason))")
+        Log.note("Widgets: back from the gallery (\(reason))")
         addingWidgetsTimer?.invalidate()
         addingWidgetsTimer = nil
         addingWidgets = nil
@@ -3391,7 +3451,7 @@ final class CanvasController {
         let claimed = Set(pairs.map(\.entry))
         rememberedClaimed = Set(pairs.map(\.proxy.windowID))
         unclaimed = unclaimed.indices.filter { !claimed.contains($0) }.map { unclaimed[$0] }
-        NSLog("Layout: \(pairs.count) back where they were last run, \(unclaimed.count) still to come")
+        Log.note("Layout: \(pairs.count) back where they were last run, \(unclaimed.count) still to come")
         return true
     }
 
@@ -3421,7 +3481,7 @@ final class CanvasController {
         for p in returning {
             let spot = NewWindowSpot.free(p.worldRect, avoiding: others, gap: gap)
             if spot.origin != p.worldRect.origin {
-                NSLog("New window: \(p.appName) — \(p.title)'s place from last run is taken, \(p.worldRect.origin) → \(spot.origin)")
+                Log.note("New window: \(p.appName) — \(p.title)'s place from last run is taken, \(p.worldRect.origin) → \(spot.origin)")
                 p.place(at: spot.origin)
                 p.layout(zoom: view.camera.zoom)
                 rememberSoon()
@@ -3434,7 +3494,7 @@ final class CanvasController {
             let spot = NewWindowSpot.spot(size: p.worldRect.size, avoiding: others, view: visible, gap: gap,
                                           target: targets[p.windowID])
             if spot.origin != p.worldRect.origin {
-                NSLog("New window: \(p.appName) — \(p.title) placed, \(p.worldRect.origin) → \(spot.origin)")
+                Log.note("New window: \(p.appName) — \(p.title) placed, \(p.worldRect.origin) → \(spot.origin)")
                 p.place(at: spot.origin)
                 p.layout(zoom: view.camera.zoom)
                 alignNatively(p)
@@ -3494,7 +3554,7 @@ final class CanvasController {
             var layout = Layout(name: name, proxies: proxies, camera: camera, viewSize: viewSize, documents: documents, groups: groups)
             layout.background = spec
             LayoutStore.save(layout)
-            NSLog("Layout: saved “\(name)” — \(layout.entries.count) windows and widgets, \(documents.count) with a document")
+            Log.note("Layout: saved “\(name)” — \(layout.entries.count) windows and widgets, \(documents.count) with a document")
             saved?()
         }
     }
@@ -3528,18 +3588,18 @@ final class CanvasController {
     /// closed, as the user chooses (`Settings.otherWindows`).
     func restoreLayout(named name: String) {
         guard let layout = LayoutStore.layouts.first(where: { $0.name == name }) else {
-            NSLog("Layout: no layout named “\(name)” to restore")
+            Log.note("Layout: no layout named “\(name)” to restore")
             return
         }
         // From the menu bar icon over another app: the canvas comes forward first.
         guard NSApp.isActive else {
-            NSLog("Layout: “\(name)” waits for the canvas to come forward")
+            Log.note("Layout: “\(name)” waits for the canvas to come forward")
             pendingPlacement = { [weak self] in self?.restoreLayout(named: name) }
             show()
             return
         }
         guard restoring == nil, addingWidgets == nil, !handingOff, activeProxy == nil else {
-            NSLog("Layout: can't restore “\(name)” now — restoring \(restoring != nil), adding widgets \(addingWidgets != nil), handing off \(handingOff), in a window \(activeProxy != nil)")
+            Log.note("Layout: can't restore “\(name)” now — restoring \(restoring != nil), adding widgets \(addingWidgets != nil), handing off \(handingOff), in a window \(activeProxy != nil)")
             return
         }
         closeSwitcher(clearHighlight: true)
@@ -3549,7 +3609,7 @@ final class CanvasController {
             await self.syncNow()
             let synced = Date()
             let documents = await self.lookUpDocuments(of: self.view.proxies)
-            NSLog("Layout: “\(name)” — synced in \(Int(synced.timeIntervalSince(started) * 1000)) ms, documents in \(Int(Date().timeIntervalSince(synced) * 1000)) ms")
+            Log.note("Layout: “\(name)” — synced in \(Int(synced.timeIntervalSince(started) * 1000)) ms, documents in \(Int(Date().timeIntervalSince(synced) * 1000)) ms")
             self.restore(layout, documents: documents)
         }
     }
@@ -3558,7 +3618,7 @@ final class CanvasController {
     /// `documents` is what `lookUpDocuments` found, asked for beforehand so no app is asked anything here.
     private func restore(_ layout: Layout, documents: [CGWindowID: String] = [:], policy override: Settings.OtherWindows? = nil) {
         guard restoring == nil, addingWidgets == nil, !handingOff else {
-            NSLog("Layout: “\(layout.name)” dropped — restoring \(restoring != nil), adding widgets \(addingWidgets != nil), handing off \(handingOff)")
+            Log.note("Layout: “\(layout.name)” dropped — restoring \(restoring != nil), adding widgets \(addingWidgets != nil), handing off \(handingOff)")
             return
         }
         let pairs = Layout.match(layout.entries, view.proxies, document: { documents[$0.windowID] })
@@ -3567,12 +3627,12 @@ final class CanvasController {
         var policy = override ?? Settings.otherWindows
         if policy == .ask, !others.isEmpty {
             guard let choice = LayoutPrompt.otherWindows(others.count, layout: layout.name) else {
-                NSLog("Layout: “\(layout.name)” cancelled at the other-windows prompt")
+                Log.note("Layout: “\(layout.name)” cancelled at the other-windows prompt")
                 return
             }
             policy = choice
         }
-        NSLog("Layout: restoring “\(layout.name)” — \(pairs.count) of \(layout.entries.count) on the canvas, \(others.count) other windows (\(policy))")
+        Log.note("Layout: restoring “\(layout.name)” — \(pairs.count) of \(layout.entries.count) on the canvas, \(others.count) other windows (\(policy))")
 
         // Stacked as saved, above whatever else stays.
         var moves: [(proxy: WindowProxy, to: CGPoint)] = []
@@ -3646,12 +3706,12 @@ final class CanvasController {
                     let p = self.proxies[id] ?? self.away[id]
                     if let p, p.ax == nil { p.ax = ax }
                     guard ax != nil, !fullScreen else {
-                        NSLog("Layout: can't resize \(name)\(ax == nil ? " (Accessibility granted?)" : ": it's full screen")")
+                        Log.note("Layout: can't resize \(name)\(ax == nil ? " (Accessibility granted?)" : ": it's full screen")")
                         return
                     }
                     guard let p, let real else { return }
                     if abs(real.width - size.width) > 0.5 || abs(real.height - size.height) > 0.5 {
-                        NSLog("Layout: \(name) is \(Int(real.width))×\(Int(real.height)), not \(Int(size.width))×\(Int(size.height)): the app's own limits")
+                        Log.note("Layout: \(name) is \(Int(real.width))×\(Int(real.height)), not \(Int(size.width))×\(Int(size.height)): the app's own limits")
                     }
                     // The app's answer stands, unless the proxy has been given another size meanwhile.
                     if abs(p.worldRect.width - size.width) <= 0.5, abs(p.worldRect.height - size.height) <= 0.5 { p.resized(toReal: real) }
@@ -3706,7 +3766,7 @@ final class CanvasController {
             case .rightHalf: stepStrip(.right)
             case .topHalf: stepStrip(.up)
             case .bottomHalf: stepStrip(.down)
-            default: NSLog("Tile: \(preset.title) is off in strip mode")
+            default: Log.note("Tile: \(preset.title) is off in strip mode")
             }
             return
         }
@@ -3726,7 +3786,7 @@ final class CanvasController {
         let preset = cycled(requested, for: p)
         let area = tileArea(for: p)
         let rect = Tiling.rect(preset, size: p.worldRect.size, in: area, gap: Settings.tileGap)
-        NSLog("Tile: \(p.appName) — \(p.title) → \(preset.title)")
+        Log.note("Tile: \(p.appName) — \(p.title) → \(preset.title)")
         let before = placementState(of: [p])
         view.bringToFront(p)
         view.release(p)   // placed on its own: it leaves its group
@@ -3747,7 +3807,7 @@ final class CanvasController {
     func zoom(_ p: WindowProxy) {
         guard p.kind == .window, restoring == nil, addingWidgets == nil, !handingOff, !Settings.stripMode else { return }
         if p.tile?.preset == .full, let back = unzoomed.removeValue(forKey: p.windowID) {
-            NSLog("Tile: \(p.appName) — \(p.title) → back from Full")
+            Log.note("Tile: \(p.appName) — \(p.title) → back from Full")
             let before = placementState(of: [p])
             view.bringToFront(p)
             let move = placement(p, in: back, anchor: .zero)
@@ -3790,7 +3850,7 @@ final class CanvasController {
         var partners = mru.compactMap { id in onCanvas.first { $0.windowID == id } }
         partners += onCanvas.reversed().filter { q in !partners.contains { $0 === q } }
         let placed = [p] + partners.prefix(share.cells.count - 1)
-        NSLog("Tile: \(p.appName) — \(p.title) → \(share.title) with \(placed.count - 1) other(s)")
+        Log.note("Tile: \(p.appName) — \(p.title) → \(share.title) with \(placed.count - 1) other(s)")
         let before = placementState(of: placed)
         var moves: [(proxy: WindowProxy, to: CGPoint)] = []
         for (cell, q) in zip(share.cells, placed) {
@@ -3833,7 +3893,7 @@ final class CanvasController {
         let windows = view.proxies.filter { $0.standsAlone && area.contains(centre($0)) }
         guard !windows.isEmpty else { return }
         let order = Tiling.arrangeOrder(windows.map(\.worldRect), rows: rows)
-        NSLog("Tile: arranging \(min(order.count, columns * rows)) windows in \(columns)×\(rows)")
+        Log.note("Tile: arranging \(min(order.count, columns * rows)) windows in \(columns)×\(rows)")
         let placed = order.prefix(columns * rows).map { windows[$0] }
         let before = placementState(of: placed)
         var moves: [(proxy: WindowProxy, to: CGPoint)] = []
@@ -3915,7 +3975,7 @@ final class CanvasController {
     /// The window glides to `origin`, its size kept. ⌘Z puts it back.
     func agentMove(_ id: CGWindowID, to origin: CGPoint) -> Bool {
         guard agentBusy == nil, let p = view.proxies.first(where: { $0.windowID == id }), p.standsAlone else { return false }
-        NSLog("Tell Sunlight: move \(p.appName) — \(p.title)")
+        Log.note("Tell Sunlight: move \(p.appName) — \(p.title)")
         let before = placementState(of: [p])
         view.bringToFront(p)
         view.release(p)
@@ -3933,7 +3993,7 @@ final class CanvasController {
     /// The window takes `size` (the app may hold it to a size of its own), its top-left kept. ⌘Z undoes it.
     func agentResize(_ id: CGWindowID, to size: CGSize) -> Bool {
         guard agentBusy == nil, let p = view.proxies.first(where: { $0.windowID == id }), p.standsAlone else { return false }
-        NSLog("Tell Sunlight: resize \(p.appName) — \(p.title)")
+        Log.note("Tell Sunlight: resize \(p.appName) — \(p.title)")
         let before = placementState(of: [p])
         view.bringToFront(p)
         view.release(p)
@@ -4043,7 +4103,7 @@ final class CanvasController {
         }
         let befores = deskCanvases.map { ($0, $0.placementState(of: $0.stripWindows)) }
         Settings.stripMode = on
-        NSLog("Strip: \(on ? "on" : "off"), \(stripWindows.count) windows")
+        Log.note("Strip: \(on ? "on" : "off"), \(stripWindows.count) windows")
         // Polarity rests while the strip rules, and wakes after: its chrome follows.
         NotificationCenter.default.post(name: Settings.magneticPolarityDidChange, object: nil)
         // Every display's canvas has a strip of its own.
@@ -4225,7 +4285,7 @@ final class CanvasController {
             NSSound.beep()
             return
         }
-        NSLog("Strip: \(direction) to \(windows[next].appName) — \(windows[next].title)")
+        Log.note("Strip: \(direction) to \(windows[next].appName) — \(windows[next].title)")
         handoff(to: windows[next])
     }
 
@@ -4267,7 +4327,7 @@ final class CanvasController {
         guard !items.isEmpty else { return }
         let placed = Tidy.layout(items, options: options, screen: screen)
         let how = options.sizing == .keep ? "sizes kept" : "same size"
-        NSLog("Tidy: \(items.count) windows and groups, \(how), by \(options.order.title)")
+        Log.note("Tidy: \(items.count) windows and groups, \(how), by \(options.order.title)")
         let all = blocks.flatMap { $0 }
         let before = placementState(of: all)
         var moves: [(proxy: WindowProxy, to: CGPoint)] = []
@@ -4373,7 +4433,7 @@ final class CanvasController {
         AXQueue.interactive.async { [weak self] in
             var done = NativeTiling.supports(preset) && NativeTiling.tile(pid: pid, preset)
             if done {
-                NSLog("Tile: \(app.localizedName ?? "?") → \(preset.title) (macOS tiling)")
+                Log.note("Tile: \(app.localizedName ?? "?") → \(preset.title) (macOS tiling)")
             } else if let ax = AXWindow.focusedWindow(pid: pid), !ax.isFullScreen, let frame = ax.frame {
                 let screen = Display.index(for: frame, in: displays).map { displays[$0].visible } ?? screen
                 let rect = Tiling.rect(preset, size: frame.size, in: screen, gap: gap)
@@ -4386,7 +4446,7 @@ final class CanvasController {
                     if fit.origin != landed.origin { ax.setPosition(fit.origin) }
                 }
                 done = true
-                NSLog("Tile: \(app.localizedName ?? "?") → \(preset.title)")
+                Log.note("Tile: \(app.localizedName ?? "?") → \(preset.title)")
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -4438,7 +4498,7 @@ final class CanvasController {
                     if p.ax == nil { p.ax = ax }
                     guard let real else {
                         if finished {
-                            NSLog("Resize: can't resize \(p.appName) — \(p.title)\(ax == nil ? " (Accessibility granted?)" : ": it's full screen")")
+                            Log.note("Resize: can't resize \(p.appName) — \(p.title)\(ax == nil ? " (Accessibility granted?)" : ": it's full screen")")
                             // The proxy goes back to the size the real window still has.
                             p.resized(toReal: p.lastRealFrame, anchor: anchor)
                         }
@@ -4449,7 +4509,7 @@ final class CanvasController {
                         return
                     }
                     if abs(real.width - size.width) > 0.5 || abs(real.height - size.height) > 0.5 {
-                        NSLog("Resize: \(p.appName) — \(p.title) is \(Int(real.width))×\(Int(real.height)), not \(Int(size.width))×\(Int(size.height)): the app's own limits")
+                        Log.note("Resize: \(p.appName) — \(p.title) is \(Int(real.width))×\(Int(real.height)), not \(Int(size.width))×\(Int(size.height)): the app's own limits")
                     }
                     p.resized(toReal: real, anchor: anchor)
                     self.minimap.redraw()
@@ -4478,14 +4538,14 @@ final class CanvasController {
     /// second window, a widget since removed) can't be brought back from here. Returns the apps it opened.
     private func open(_ entries: [Layout.Entry]) -> Set<String> {
         for e in entries where e.kind == .widget {
-            NSLog("Layout: the \(e.appName) widget isn't on the desktop — Add Widgets… puts it back")
+            Log.note("Layout: the \(e.appName) widget isn't on the desktop — Add Widgets… puts it back")
         }
         var opened: Set<String> = []
         let windows = entries.filter { $0.kind == .window }
         for (bundleID, wanted) in Dictionary(grouping: windows, by: { $0.bundleID ?? "" }) {
             let name = wanted[0].appName
             guard !bundleID.isEmpty, let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-                NSLog("Layout: \(name) isn't installed")
+                Log.note("Layout: \(name) isn't installed")
                 continue
             }
             let running = !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
@@ -4496,19 +4556,19 @@ final class CanvasController {
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = false
             if !documents.isEmpty {
-                NSLog("Layout: opening \(documents.map { $0.isFileURL ? $0.lastPathComponent : $0.absoluteString }.joined(separator: ", ")) in \(name)")
+                Log.note("Layout: opening \(documents.map { $0.isFileURL ? $0.lastPathComponent : $0.absoluteString }.joined(separator: ", ")) in \(name)")
                 NSWorkspace.shared.open(documents, withApplicationAt: app, configuration: configuration) { _, error in
-                    if let error { NSLog("Layout: \(name) couldn't open its documents — \(error.localizedDescription)") }
+                    if let error { Log.note("Layout: \(name) couldn't open its documents — \(error.localizedDescription)") }
                 }
                 opened.insert(bundleID)
             } else if !running || !hasWindows {
-                NSLog("Layout: \(running ? "reopening" : "launching") \(name)")
+                Log.note("Layout: \(running ? "reopening" : "launching") \(name)")
                 NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
-                    if let error { NSLog("Layout: \(name) didn't open — \(error.localizedDescription)") }
+                    if let error { Log.note("Layout: \(name) didn't open — \(error.localizedDescription)") }
                 }
                 opened.insert(bundleID)
             } else {
-                NSLog("Layout: can't reopen \(wanted.count) window(s) of \(name) from here: no document to open")
+                Log.note("Layout: can't reopen \(wanted.count) window(s) of \(name) from here: no document to open")
             }
         }
         return opened
@@ -4523,7 +4583,7 @@ final class CanvasController {
         // An app that activated itself as it launched has its windows over the canvas: put it back in front.
         if !NSApp.isActive, activeProxy == nil,
            let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, state.apps.contains(front) {
-            NSLog("Layout: \(front) came to the front as it launched — bringing the canvas back")
+            Log.note("Layout: \(front) came to the front as it launched — bringing the canvas back")
             show()
             return
         }
@@ -4556,7 +4616,7 @@ final class CanvasController {
             applyPolarity(of: entries[k], to: p)
             applyPip(of: entries[k], to: p)
             if let g = entries[k].group { view.adopt(group: g, for: p, remap: &state.groups) }
-            NSLog("Layout: \(p.appName) — \(p.title) is back")
+            Log.note("Layout: \(p.appName) — \(p.title) is back")
         }
         let claimed = Set(pairs.map { state.pending[$0.entry] })
         state.pending.removeAll { claimed.contains($0) }
@@ -4577,7 +4637,7 @@ final class CanvasController {
         restoringTimer = nil
         if let state = restoring {
             let missing = state.pending.map { state.layout.entries[$0] }.map { $0.title.isEmpty ? $0.appName : "\($0.appName) — \($0.title)" }
-            NSLog("Layout: “\(state.layout.name)” restored\(missing.isEmpty ? "" : "; never showed up: \(missing.joined(separator: ", "))")")
+            Log.note("Layout: “\(state.layout.name)” restored\(missing.isEmpty ? "" : "; never showed up: \(missing.joined(separator: ", "))")")
         }
         restoring = nil
         foldRestoredIntoStrip()
@@ -4630,7 +4690,7 @@ final class CanvasController {
         handingOff = true
         endShowDesktop(flyBack: false)
         handoffTarget = p   // before the camera moves: the pass must not restart its stream mid-flight
-        NSLog("Handoff: → \(p.appName) — \(p.title)")
+        Log.note("Handoff: → \(p.appName) — \(p.title)")
         closeSwitcher(clearHighlight: true)
         view.bringToFront(p)
         // Stop streaming the app now, not at the seam: the pill takes a moment to clear, and the flight
@@ -4654,7 +4714,7 @@ final class CanvasController {
             raiseForHandoff(p)
         } else if p.ax == nil {
             p.ax = AXWindow.find(windowID: p.windowID, pid: p.pid, approximateFrame: p.lastRealFrame)
-            if p.ax == nil { NSLog("Handoff: no AX window for \(p.appName) — Accessibility granted?") }
+            if p.ax == nil { Log.note("Handoff: no AX window for \(p.appName) — Accessibility granted?") }
         }
 
         // Where the real window will sit at 1:1 (pixel-aligned, below the menu bar) and the camera that
@@ -4720,7 +4780,7 @@ final class CanvasController {
                 if self.realWindows.lastRestoreKept {
                     for (q, at) in kept { q.placedNatively(at: listed[q.windowID] ?? at) }
                     let own = kept.filter { $0.proxy.pid == p.pid }.count
-                    NSLog("Handoff: \(kept.count - own) other window(s) in view stay on show, \(own) of its app's where the canvas has them")
+                    Log.note("Handoff: \(kept.count - own) other window(s) in view stay on show, \(own) of its app's where the canvas has them")
                 }
                 self.realWindowsPresented = false
                 // An add-on before sunlight-10 doesn't keep windows: its app's others go through Accessibility.
@@ -4772,7 +4832,7 @@ final class CanvasController {
                 aligned = target
                 if landed != p.worldRect.origin { move = landed }
                 if hypot(landed.x - p.worldRect.minX, landed.y - p.worldRect.minY) > 1 {
-                    NSLog("Handoff: \(p.appName) can't sit where it is, moved by (\(Int(landed.x - p.worldRect.minX)), \(Int(landed.y - p.worldRect.minY))): the app's own limits")
+                    Log.note("Handoff: \(p.appName) can't sit where it is, moved by (\(Int(landed.x - p.worldRect.minX)), \(Int(landed.y - p.worldRect.minY))): the app's own limits")
                 }
             }
         }
@@ -4910,7 +4970,7 @@ final class CanvasController {
         let corner = freeCorner(preferring: p.lastPipCorner ?? lastPipCorner)
         let scale = PictureInPicture.defaultScale(size: size, visible: visible)
         let target = PictureInPicture.frame(in: corner, scale: scale, size: size, visible: visible)
-        NSLog("PiP: \(p.appName) — \(p.title) into \(corner) ×\(String(format: "%.2f", scale))")
+        Log.note("PiP: \(p.appName) — \(p.title) into \(corner) ×\(String(format: "%.2f", scale))")
         p.lastPipCorner = corner
         lastPipCorner = corner
         p.pipTucked = nil
@@ -4940,7 +5000,7 @@ final class CanvasController {
     /// the window is just drawn there again (a close, a move to another display, a layout).
     private func endPip(_ p: WindowProxy, animated: Bool = false) {
         guard p.pip != nil else { return }
-        NSLog("PiP: \(p.appName) — \(p.title) out")
+        Log.note("PiP: \(p.appName) — \(p.title) out")
         pipOrder.removeAll { $0 == p.windowID }
         p.pipTucked = nil
         if animated, !handingOff, NSApp.isActive {
@@ -5024,13 +5084,13 @@ final class CanvasController {
         handingOff = true
         endShowDesktop(flyBack: false)
         handoffTarget = p
-        NSLog("Handoff: → \(p.appName) — \(p.title), from its tile")
+        Log.note("Handoff: → \(p.appName) — \(p.title), from its tile")
         closeSwitcher(clearHighlight: true)
         p.refresh(seam: true)
         stopStreams(of: p.pid)
         if p.ax == nil {
             p.ax = AXWindow.find(windowID: p.windowID, pid: p.pid, approximateFrame: p.lastRealFrame)
-            if p.ax == nil { NSLog("Handoff: no AX window for \(p.appName) — Accessibility granted?") }
+            if p.ax == nil { Log.note("Handoff: no AX window for \(p.appName) — Accessibility granted?") }
         }
         p.ax?.raise(); raiseAttachedChildren(of: p)
         let rect = PictureInPicture.returnRect(f, size: p.worldRect.size, visible: visibleTopLeft, scale: scale)
@@ -5093,7 +5153,7 @@ final class CanvasController {
             return false
         }
         let p = windows[hit.index]
-        NSLog("Snap: onto \(p.appName) — \(p.title)")
+        Log.note("Snap: onto \(p.appName) — \(p.title)")
         view.snap(to: hit.camera) { [weak self, weak p] in
             guard let self, let p, self.proxies[p.windowID] === p else { return }
             self.handoff(to: p)
@@ -5280,7 +5340,8 @@ final class CanvasController {
     /// readings disagree by a fraction, and no frame is read against a camera other than the one it
     /// belongs with (`FrameSnapshot`). About a millisecond, on the main thread.
     private func snapshot(at camera: Camera? = nil) -> FrameSnapshot {
-        FrameSnapshot(list: WindowList.queue.sync { WindowList.onScreen() }, camera: global(camera ?? view.camera))
+        FrameSnapshot(list: Watchdog.during("the window list (WindowList.onScreen)") { WindowList.queue.sync { WindowList.onScreen() } },
+                      camera: global(camera ?? view.camera))
     }
 
     /// Where a window sits natively when the canvas is at `camera`, in global points: its canvas place
@@ -5305,7 +5366,7 @@ final class CanvasController {
             let expected = nativeOrigin(of: q, at: camera, clamped: q === activeProxy || q === handoffTarget)
             let dx = native.minX - expected.x, dy = native.minY - expected.y
             guard abs(dx) > 1 || abs(dy) > 1 else { continue }
-            NSLog("Placement: \(q.appName) — \(q.title) is (\(Int(dx.rounded())), \(Int(dy.rounded()))) pt off its canvas place at the \(moment): natively (\(Int(native.minX)), \(Int(native.minY))), canvas (\(Int(expected.x)), \(Int(expected.y)))")
+            Log.note("Placement: \(q.appName) — \(q.title) is (\(Int(dx.rounded())), \(Int(dy.rounded()))) pt off its canvas place at the \(moment): natively (\(Int(native.minX)), \(Int(native.minY))), canvas (\(Int(expected.x)), \(Int(expected.y)))")
         }
     }
 
@@ -5337,7 +5398,7 @@ final class CanvasController {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    if ax == nil, known == nil { NSLog("Handoff: no AX window for \(name) — Accessibility granted?") }
+                    if ax == nil, known == nil { Log.note("Handoff: no AX window for \(name) — Accessibility granted?") }
                     if let p = self.proxies[id], p.ax == nil { p.ax = ax }
                     for (childID, child) in found { if let c = self.proxies[childID], c.ax == nil { c.ax = child } }
                 }
@@ -5363,7 +5424,7 @@ final class CanvasController {
             guard hypot(origin.x - q.lastRealFrame.minX, origin.y - q.lastRealFrame.minY) > 1 else { continue }
             if !moveNativelyNow(q, to: origin) { continue }
             q.placedNatively(at: CGRect(origin: origin, size: q.lastRealFrame.size))
-            NSLog("Handoff: \(q.appName) — \(q.title) natively to its place on the canvas, \(q.lastRealFrame.integral.origin)")
+            Log.note("Handoff: \(q.appName) — \(q.title) natively to its place on the canvas, \(q.lastRealFrame.integral.origin)")
         }
     }
 
@@ -5407,7 +5468,7 @@ final class CanvasController {
                 // Neither taken (Sunlight isn't the front app, so it has nothing to yield: a window
                 // entered by ⌘Tab while another was in use where it's drawn): the way that can't be refused.
                 let carbon = forced ? noErr : forceAppFront(p.pid)
-                NSLog("Handoff: activate \(p.appName) — yielded \(yielded), fallback \(forced)\(forced ? "" : ", SetFrontProcess \(carbon == noErr ? "ok" : "failed (\(carbon))")"), we were active: \(NSApp.isActive)")
+                Log.note("Handoff: activate \(p.appName) — yielded \(yielded), fallback \(forced)\(forced ? "" : ", SetFrontProcess \(carbon == noErr ? "ok" : "failed (\(carbon))")"), we were active: \(NSApp.isActive)")
             }
         }
 
@@ -5431,7 +5492,7 @@ final class CanvasController {
         }
         if springDrag {
             window.ignoresMouseEvents = true
-            NSLog("Desktop: the canvas steps aside for the drop into \(p.appName)")
+            Log.note("Desktop: the canvas steps aside for the drop into \(p.appName)")
         }
     }
 
@@ -5451,12 +5512,12 @@ final class CanvasController {
             // first activation. Then undo the handoff state.
             if NSApp.isActive, let p = self.activeProxy, p.pid == pid {
                 if attempt == 0, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
-                    NSLog("Handoff: \(p.appName) hasn't come to the front — asking once more")
+                    Log.note("Handoff: \(p.appName) hasn't come to the front — asking once more")
                     if !app.activate(options: []) { _ = forceAppFront(pid) }
                     self.expectActivation(of: pid, attempt: 1)
                     return
                 }
-                NSLog("Handoff: \(p.appName) did not activate — rolling back")
+                Log.note("Handoff: \(p.appName) did not activate — rolling back")
                 self.leaveEntered(reconcile: false)
                 self.applyPendingSwitcher()   // ⌘Tab pressed meanwhile was waiting for the canvas
             }
@@ -5482,7 +5543,7 @@ final class CanvasController {
         let placedAt = enteredCamera ?? view.camera
         enteredCamera = nil
         if !placedAt.isClose(to: view.camera) {
-            NSLog("Placement: the canvas is back at a camera other than the one \(p.appName) was entered at (zoom \(view.camera.zoom) at (\(Int(view.camera.origin.x)), \(Int(view.camera.origin.y))) vs 1 at (\(Int(placedAt.origin.x)), \(Int(placedAt.origin.y)))); its windows are read at the entry camera")
+            Log.note("Placement: the canvas is back at a camera other than the one \(p.appName) was entered at (zoom \(view.camera.zoom) at (\(Int(view.camera.origin.x)), \(Int(view.camera.origin.y))) vs 1 at (\(Int(placedAt.origin.x)), \(Int(placedAt.origin.y)))); its windows are read at the entry camera")
         }
         // On the live canvas the window server is the one source of native frames, as in the listing;
         // Accessibility only when there's no listing to read (capture mode), or it has no entry for the
@@ -5541,7 +5602,7 @@ final class CanvasController {
     }
 
     private func returnedToCanvas() {
-        NSLog("Sunlight: active (was in \(activeProxy.map { "\($0.appName) — \($0.title)" } ?? "nothing"))")
+        Log.note("Sunlight: active (was in \(activeProxy.map { "\($0.appName) — \($0.title)" } ?? "nothing"))")
         let wasIn = activeProxy
         if let id = shadowEasedBack {
             shadowEasedBack = nil
@@ -5814,7 +5875,7 @@ final class CanvasController {
         let summary = "Capture: \(view.proxies.count) proxies, \(streaming) streaming at level \(lod.applied) (×\(String(format: "%.3f", CanvasController.factor(forLevel: lod.applied)))), \(capped) stills, \(far) far, \(front) in front\(asleep ? ", asleep" : "")\(canvasOccluded ? ", canvas hidden" : "")"
         if summary != lastCaptureSummary {
             lastCaptureSummary = summary
-            NSLog(summary)
+            Log.note(summary)
         }
         if let due { scheduleCapturePass(after: max(0.01, due - now)) }
         ensureRefreshTimer()
@@ -5842,7 +5903,7 @@ final class CanvasController {
     /// at the current zoom — the camera stays where the user left it.
     private func keepOnCanvas(_ app: NSRunningApplication) {
         let name = app.localizedName ?? "pid \(app.processIdentifier)"
-        NSLog("Launch: \(name) opens on the canvas")
+        Log.note("Launch: \(name) opens on the canvas")
         expectArrival(of: app, name: name)
         show()
     }
@@ -5856,10 +5917,10 @@ final class CanvasController {
             if l.arrived == nil, proxies.values.contains(where: { $0.pid == pid && $0.kind == .window }) {
                 l.arrived = now
                 launches[pid] = l
-                NSLog("Launch: \(l.name) is on the canvas")
+                Log.note("Launch: \(l.name) is on the canvas")
             }
             if l.arrived == nil, now >= l.deadline {
-                NSLog("Launch: \(l.name) showed no window for the canvas in \(Int(CanvasController.launchWait)) s — no longer held behind it")
+                Log.note("Launch: \(l.name) showed no window for the canvas in \(Int(CanvasController.launchWait)) s — no longer held behind it")
                 if !NSApp.isActive { liftWindows(of: pid) }
                 windowlessApps.insert(pid)
                 launches[pid] = nil
@@ -5965,11 +6026,11 @@ final class CanvasController {
                 if moveNativelyNow(p, to: parked) {
                     native.origin = parked
                     parkedOffScreen[p.windowID] = origin
-                    NSLog("New window: \(p.appName) — \(p.title) parked off the screen until the seam, spot \(origin)")
+                    Log.note("New window: \(p.appName) — \(p.title) parked off the screen until the seam, spot \(origin)")
                 }
             } else if moveNativelyNow(p, to: origin) {
                 native.origin = origin
-                NSLog("New window: \(p.appName) — \(p.title) natively to its spot at once, \(origin)")
+                Log.note("New window: \(p.appName) — \(p.title) natively to its spot at once, \(origin)")
             }
         }
         p.placedNatively(at: native)
@@ -5988,7 +6049,7 @@ final class CanvasController {
         guard hypot(origin.x - p.lastRealFrame.minX, origin.y - p.lastRealFrame.minY) > 1 else { return }
         if moveNativelyNow(p, to: origin) {
             p.placedNatively(at: CGRect(origin: origin, size: p.lastRealFrame.size))
-            NSLog("New window: \(p.appName) — \(p.title) natively to its place at the last 1:1 camera, \(origin)")
+            Log.note("New window: \(p.appName) — \(p.title) natively to its place at the last 1:1 camera, \(origin)")
         }
     }
 
@@ -6016,7 +6077,7 @@ final class CanvasController {
     /// `known`: a window already on the canvas (brought forward by the Dock, Spotlight, ⌘`), drawn at its
     /// place all the way there rather than held back or gliding in, as a new window is.
     private func slide(into p: WindowProxy, onScreen: Bool, from: CGPoint? = nil, known: Bool = false) {
-        NSLog("New window: \(p.appName) — \(p.title) opened over others — to \(p.worldRect.origin)\(onScreen ? ", on screen" : ", over to it")")
+        Log.note("New window: \(p.appName) — \(p.title) opened over others — to \(p.worldRect.origin)\(onScreen ? ", on screen" : ", over to it")")
         holdKeys(for: p)
         // One sliding in at a time: one before it whose placement this replaces shows where it is.
         if let earlier = slidingIn, earlier !== p { letGo(earlier) }
@@ -6094,7 +6155,7 @@ final class CanvasController {
             return
         }
         noteArrived([p])
-        NSLog("New window: \(id) (\(p.appName)) taken in as it was announced\(hidden != nil ? ", hidden since" : "")")
+        Log.note("New window: \(id) (\(p.appName)) taken in as it was announced\(hidden != nil ? ", hidden since" : "")")
         if placeInFront(p, real: w.bounds, near: near) {
             if pendingAbsorbPID == w.pid { clearPending() }
         } else {
@@ -6146,7 +6207,7 @@ final class CanvasController {
             && w.pid != myPID && bundleID(of: w.pid) != Bundle.main.bundleIdentifier {
             if LiveWindowsConnection.command(LiveWindowsWire.level(w.id, 0)) { lowered.append("\(w.id) (\(NSRunningApplication(processIdentifier: w.pid)?.localizedName ?? "pid \(w.pid)"))") }
         }
-        if !lowered.isEmpty { NSLog("Rendering: \(lowered.count) window(s) left at the canvas's levels put back to the normal level: \(lowered.joined(separator: ", "))") }
+        if !lowered.isEmpty { Log.note("Rendering: \(lowered.count) window(s) left at the canvas's levels put back to the normal level: \(lowered.joined(separator: ", "))") }
     }
 
     private static var straysLowered = false
@@ -6185,7 +6246,7 @@ final class CanvasController {
         guard let spot = parkedOffScreen.removeValue(forKey: p.windowID) else { return }
         if moveNativelyNow(p, to: spot) {
             p.placedNatively(at: CGRect(origin: spot, size: p.lastRealFrame.size))
-            NSLog("New window: \(p.appName) — \(p.title) unparked to its spot, \(spot)")
+            Log.note("New window: \(p.appName) — \(p.title) unparked to its spot, \(spot)")
         }
         liftIfFront(p.windowID)
     }
@@ -6238,7 +6299,7 @@ final class CanvasController {
     private var holdKeysGeneration = 0
 
     private func dropHeldKeys() {
-        if let n = heldKeys?.events.count, n > 0 { NSLog("New window: \(n) key event(s) held for it dropped") }
+        if let n = heldKeys?.events.count, n > 0 { Log.note("New window: \(n) key event(s) held for it dropped") }
         heldKeys = nil
     }
 
@@ -6255,11 +6316,11 @@ final class CanvasController {
         guard let held = heldKeys else { return }
         heldKeys = nil
         guard held.windowID.map({ $0 == p.windowID }) ?? (held.pid == p.pid) else {
-            if !held.events.isEmpty { NSLog("New window: \(held.events.count) key event(s) held for it dropped") }
+            if !held.events.isEmpty { Log.note("New window: \(held.events.count) key event(s) held for it dropped") }
             return
         }
         guard !held.events.isEmpty else { return }
-        NSLog("New window: \(held.events.count) key event(s) typed on the way passed on to \(p.appName)")
+        Log.note("New window: \(held.events.count) key event(s) typed on the way passed on to \(p.appName)")
         whenFrontmost(held.pid) {
             for e in held.events {
                 e.setIntegerValueField(.eventSourceUserData, value: CanvasView.passedOnMark)
@@ -6286,7 +6347,7 @@ final class CanvasController {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     let before = self.commandNMakesWindow.updateValue(makes, forKey: pid)
-                    if before != makes { NSLog("New window: pid \(pid)'s ⌘N \(makes ? "makes a window — the canvas places it" : "isn't a window's — left to the app")") }
+                    if before != makes { Log.note("New window: pid \(pid)'s ⌘N \(makes ? "makes a window — the canvas places it" : "isn't a window's — left to the app")") }
                     if self.activeProxy?.pid == pid { self.env?.keyTap.update(placesNewWindow: makes) }
                 }
             }
@@ -6301,7 +6362,7 @@ final class CanvasController {
     private func newWindowBeside() {
         guard let a = activeProxy, placesNewWindows, a.kind == .window else { return passOnCommandN() }
         let middle = spotBeside(a)
-        NSLog("New window: ⌘N in \(a.appName) — \(a.title); over to \(middle) first")
+        Log.note("New window: ⌘N in \(a.appName) — \(a.title); over to \(middle) first")
         let pid = a.pid
         holdKeys(window: nil, pid: pid)
         let asked = CACurrentMediaTime()
@@ -6356,7 +6417,7 @@ final class CanvasController {
         let pid = app.processIdentifier
         let middle = spotBeside(from)
         let name = app.localizedName ?? from.appName
-        NSLog("New window: \(name) came forward from \(from.appName) with no window yet; over to \(middle) first")
+        Log.note("New window: \(name) came forward from \(from.appName) with no window yet; over to \(middle) first")
         holdKeys(window: nil, pid: pid, for: CanvasController.launchWait)
         let known = Set((Array(proxies.values) + Array(away.values)).filter { $0.pid == pid }.map(\.windowID))
         openingHere = OpenHere(name: name, bundleID: app.bundleIdentifier, pid: pid, spot: middle, enter: true, known: known,
@@ -6417,7 +6478,21 @@ final class CanvasController {
 
     // MARK: Takeover — absorbing activations that happened outside the canvas
 
-    func foreignActivation(_ app: NSRunningApplication) {
+    /// The Dock icon of the app in front clicked while the canvas is up over it: its windows used
+    /// where they're drawn (a click into one at a zoom, focus following the pointer), the app has the
+    /// front with the canvas still up, so macOS has no activation to report and the click went
+    /// nowhere; the camera stayed where it was. It is taken as the activation it would have been from
+    /// anywhere else: over to the app's window.
+    func dockClickOnFrontApp(_ app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        guard pid != myPID, activeProxy == nil, !paused, hasWindows(of: pid) else { return }
+        Log.note("Dock: \(app.localizedName ?? "pid \(pid)") clicked in the Dock while in front over the canvas — over to its window")
+        foreignActivation(app, dockClick: true)
+    }
+
+    /// `dockClick`: the user clicked the app's Dock icon (`dockClickOnFrontApp`), whatever was closed,
+    /// asked or hovered just before.
+    func foreignActivation(_ app: NSRunningApplication, dockClick: Bool = false) {
         let pid = app.processIdentifier
         guard pid != myPID else { return }   // our own: `returnedToCanvas` handles it
         // Its windows become the user's to move only once one is entered (`enter`), not here: an app
@@ -6438,15 +6513,15 @@ final class CanvasController {
         // A window just closed from the canvas: its app (or the next one macOS picks) coming forward isn't
         // the user going anywhere; the canvas stays as it was, camera and all.
         // Not with the pointer on the Dock: that's the user clicking an app there, close or no close.
-        if activeProxy == nil, Date() < quietAfterCloseUntil, !WindowList.pointerOverDock() {
-            NSLog("Close: \(app.localizedName ?? "pid \(pid)") came forward after the close — the canvas stays")
+        if activeProxy == nil, Date() < quietAfterCloseUntil, !dockClick, !WindowList.pointerOverDock() {
+            Log.note("Close: \(app.localizedName ?? "pid \(pid)") came forward after the close — the canvas stays")
             show()
             return
         }
         // An app whose window a Desktop merge just brought over (`Spaces.fold`): macOS brings it forward as
         // the window arrives. The window is placed on the canvas like any new one, and not entered.
         if activeProxy == nil, Spaces.justFolded(pid) {
-            NSLog("Spaces: \(app.localizedName ?? "pid \(pid)") came forward as its window came over from another Desktop — the canvas stays")
+            Log.note("Spaces: \(app.localizedName ?? "pid \(pid)") came forward as its window came over from another Desktop — the canvas stays")
             show()
             return
         }
@@ -6456,7 +6531,7 @@ final class CanvasController {
         // A launch being kept on the canvas came to the front again (apps activate themselves as their
         // first window appears): straight back, as for a restore.
         if activeProxy == nil, let launch = launches[pid], Date() < launch.deadline {
-            NSLog("Launch: \(launch.name) came to the front as it launched — bringing the canvas back")
+            Log.note("Launch: \(launch.name) came to the front as it launched — bringing the canvas back")
             show()
             return
         }
@@ -6467,10 +6542,10 @@ final class CanvasController {
         // Dock click, Spotlight or the app itself, it's a way over to its window like any other app's,
         // and the canvas goes there. (Kept while any app used where it's drawn had the front, the Dock
         // click went nowhere; so did one with the pointer still taken for the window behind the Dock.)
-        if activeProxy == nil, isScaledUseActivation(pid) {
+        if activeProxy == nil, !dockClick, isScaledUseActivation(pid) {
             usedScaledPIDs.insert(pid)
             wantsFrontUntil = 0   // the canvas stays up behind the app, by design; nothing brings it forward
-            NSLog("Scaled use: \(app.localizedName ?? "pid \(pid)") came forward from its window on the canvas — the canvas stays")
+            Log.note("Scaled use: \(app.localizedName ?? "pid \(pid)") came forward from its window on the canvas — the canvas stays")
             reassertCanvasOver(usedScaledApp: pid)
             return
         }
@@ -6524,7 +6599,7 @@ final class CanvasController {
         // A tile's app brought forward through the tile (a click on it while the canvas is away: a video
         // paused, a call answered): it's used where it is, in its corner; nothing moves.
         if let id = focused?.windowID, let p = proxies[id], p.pip != nil {
-            NSLog("Absorb: \(p.appName) — \(p.title) is in Picture in Picture; used at its tile")
+            Log.note("Absorb: \(p.appName) — \(p.title) is in Picture in Picture; used at its tile")
             stepDownForForeignApp()
             return
         }
@@ -6536,9 +6611,9 @@ final class CanvasController {
         // the canvas came straight back and the camera never moved; waited on, nothing moved for as
         // long as the app kept quiet.
         if !focusedNamesCanvasWindow(focused), let found = frontKnownWindow(of: pid) {
-            NSLog("Absorb: \(app.localizedName ?? "pid \(pid)") names no focused window the canvas can use; \(found.proxy.appName) — \(found.proxy.title) is in front on screen — taking the window server's word")
+            Log.note("Absorb: \(app.localizedName ?? "pid \(pid)") names no focused window the canvas can use; \(found.proxy.appName) — \(found.proxy.title) is in front on screen — taking the window server's word")
             if found.proxy.pip != nil {
-                NSLog("Absorb: \(found.proxy.appName) — \(found.proxy.title) is in Picture in Picture; used at its tile")
+                Log.note("Absorb: \(found.proxy.appName) — \(found.proxy.title) is in Picture in Picture; used at its tile")
                 stepDownForForeignApp()
                 return
             }
@@ -6564,7 +6639,7 @@ final class CanvasController {
         if onCanvas, let p = focused?.windowID.flatMap({ away[$0] })
             ?? (focused == nil ? away.values.first(where: { $0.pid == pid && $0.away == .minimized }) : nil),
            p.away == .minimized {
-            NSLog("Away: \(p.appName) — \(p.title) restored from the Dock; back to its place on the canvas")
+            Log.note("Away: \(p.appName) — \(p.title) restored from the Dock; back to its place on the canvas")
             revealOnReturn = p.windowID
             show()
             return
@@ -6596,7 +6671,7 @@ final class CanvasController {
         }
         guard let id = focused?.windowID, let w = WindowList.onScreen().first(where: { $0.id == id }) else { return true }
         if isCanvasMaterial(w) || isWidget(w) { return true }
-        NSLog("Launch: pid \(pid)'s window \(id) isn't one for the canvas — leaving it in front")
+        Log.note("Launch: pid \(pid)'s window \(id) isn't one for the canvas — leaving it in front")
         liftWindows(of: pid)
         return false
     }
@@ -6636,7 +6711,7 @@ final class CanvasController {
     /// while we're active would land below the canvas (from the canvas, `keepOnCanvas` wants just that).
     private func waitForWindow(of pid: pid_t) {
         if pendingAbsorbPID != pid {
-            NSLog("Absorb: pid \(pid) has no window yet, waiting")
+            Log.note("Absorb: pid \(pid) has no window yet, waiting")
             pendingSince = CACurrentMediaTime()
         }
         pendingAbsorbPID = pid
@@ -6653,7 +6728,7 @@ final class CanvasController {
     private func schedulePendingTick() {
         let waited = CACurrentMediaTime() - pendingSince
         guard waited < 60 else {
-            NSLog("Absorb: pid \(pendingAbsorbPID) showed no window in a minute — no longer waiting")
+            Log.note("Absorb: pid \(pendingAbsorbPID) showed no window in a minute — no longer waiting")
             if !NSApp.isActive { liftWindows(of: pendingAbsorbPID) }
             clearPending()
             return
@@ -6704,7 +6779,7 @@ final class CanvasController {
                     } else if let found = self.frontKnownWindow(of: pid), found.proxy.pip == nil {
                         // Accessibility still names nothing, and a window the canvas knows is in front on
                         // the screen (one that came up after the activation): the window server's word.
-                        NSLog("Absorb: pid \(pid) still names no focused window; \(found.proxy.appName) — \(found.proxy.title) is in front on screen — taking the window server's word")
+                        Log.note("Absorb: pid \(pid) still names no focused window; \(found.proxy.appName) — \(found.proxy.title) is in front on screen — taking the window server's word")
                         self.clearPending()
                         found.canvas.absorbKnown(found.proxy, ax: found.proxy.ax, real: found.info.bounds)
                     } else {
@@ -6723,7 +6798,7 @@ final class CanvasController {
         guard renderer == .realWindows, additionNumber >= 27, !NSApp.isActive else { return }
         let fresh = WindowList.onScreen().filter { $0.pid == pid && isCanvasMaterial($0) && proxies[$0.id] == nil && away[$0.id] == nil }
         guard let w = fresh.first else { return }
-        NSLog("Absorb: pid \(pid)'s window \(w.id) is on screen though Accessibility names none — taking it in")
+        Log.note("Absorb: pid \(pid)'s window \(w.id) is on screen though Accessibility names none — taking it in")
         hideArrival(w.id)   // off the screen at once, as at an announcement: it sat over the window in use
         takeInFront(w.id)
     }
@@ -6755,9 +6830,16 @@ final class CanvasController {
         let fullScreen = read?.fullScreen ?? ax.isFullScreen
         let frame: CGRect?
         if let read { frame = read.frame } else { frame = ax.frame }
-        guard !fullScreen, let id = ax.windowID, let real = frame else {
+        guard !fullScreen, let id = ax.windowID, let listedReal = frame else {
             waitForWindow(of: ax.pid)
             return
+        }
+        var real = listedReal
+        // Closed by its app and now in front again, named by it: reopened (Music's window, from the Dock),
+        // and back where it was if the canvas had moved it off the screen.
+        if let entry = closedByApp.removeValue(forKey: id) {
+            Log.note("Closed: window \(id) is in front again, named by its app — taken back")
+            if let home = entry.home, bringHome(id, home) { real.origin = home }
         }
         if let other = desk?.canvas(forWindow: id, frame: real), other !== self {
             clearPending()
@@ -6805,7 +6887,7 @@ final class CanvasController {
         let shown = screen.intersection(real)
         let mostlyOff = shown.isNull || shown.width * shown.height < real.width * real.height / 2
         if renderer == .realWindows, placesNewWindows, p.standsAlone, p.kind == .window, !sitsWhereCanvasHasIt(p, real: real) || mostlyOff {
-            NSLog("Absorb: \(p.appName) — \(p.title) came up at \(real.integral.origin), \(mostlyOff ? "mostly off the screen" : "not where the canvas has it") — over to it")
+            Log.note("Absorb: \(p.appName) — \(p.title) came up at \(real.integral.origin), \(mostlyOff ? "mostly off the screen" : "not where the canvas has it") — over to it")
             if let ax { p.ax = ax }
             p.owner = .canvas
             clearPending()
@@ -6842,7 +6924,7 @@ final class CanvasController {
     }
 
     private func adopt(_ p: WindowProxy, ax: AXWindow?, real: CGRect) {
-        NSLog("Absorb: \(p.appName) — \(p.title) at \(real.integral)")
+        Log.note("Absorb: \(p.appName) — \(p.title) at \(real.integral)")
         clearPending()
         liftWindow(p)
         view.bringToFront(p)
@@ -6907,10 +6989,10 @@ final class CanvasController {
         if renderer == .realWindows, real.isClose(to: p.lastRealFrame), mostlyOff, placesNewWindows {
             p.ax = ax
             p.owner = .canvas   // its place on the canvas is the truth; the canvas goes over to it
-            NSLog("Absorb: sibling \(p.appName) — \(p.title) is off screen where the canvas has it — over to it")
+            Log.note("Absorb: sibling \(p.appName) — \(p.title) is off screen where the canvas has it — over to it")
             return slide(into: p, onScreen: false, known: true)
         }
-        NSLog("Absorb: sibling \(p.appName) — \(p.title) at \(real.integral)")
+        Log.note("Absorb: sibling \(p.appName) — \(p.title) at \(real.integral)")
         liftWindow(p)
         p.ax = ax
         let before = p.worldRect.origin
@@ -6941,16 +7023,174 @@ final class CanvasController {
     /// The entered window closed. Apps usually focus a sibling first (handled above); if nothing is
     /// focused after a beat, the canvas comes back. The app is asked off the main thread: one closing
     /// a window (saving, quitting) can be slow to answer.
+    ///
+    /// The app is asked, too, whether the entered window is still one of its windows. One it no longer
+    /// names but the window server still has on screen (Music hides its last window that way) is closed
+    /// all the same (`closeForApp`): otherwise its proxy stays on the canvas and in ⌘Tab for good.
     func enteredWindowDestroyed(pid: pid_t) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self, self.activeProxy?.pid == pid, !NSApp.isActive else { return }
+            guard let self, let entered = self.activeProxy, entered.pid == pid, !NSApp.isActive else { return }
+            let id = entered.windowID
             AXQueue.interactive.async { [weak self] in
                 let focused = AXWindow.focusedWindow(pid: pid)
+                let named = AXWindow.names(windowID: id, pid: pid)
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        guard let self, self.activeProxy?.pid == pid, !NSApp.isActive, focused == nil else { return }
-                        NSLog("Entered window closed, nothing else focused — back to the canvas")
+                        guard let self else { return }
+                        if named == false, let p = self.proxies[id], p.pid == pid { self.closeForApp(p) }
+                        else if named != false { self.confirmClosed(id, pid: pid, attempt: 1) }
+                        guard self.activeProxy?.pid == pid, !NSApp.isActive, focused == nil else { return }
+                        Log.note("Entered window closed, nothing else focused — back to the canvas")
                         self.showCanvas(fitAll: false)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The entered window's app still named it, or didn't answer, a moment after it was destroyed: asked
+    /// again a few times over the next seconds, as an app can take a beat to drop it from its list.
+    private func confirmClosed(_ id: CGWindowID, pid: pid_t, attempt: Int) {
+        guard attempt <= 4 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4 * Double(attempt)) { [weak self] in
+            MainActor.assumeIsolated { self?.askClosed(id, pid: pid, attempt: attempt) }
+        }
+    }
+
+    private func askClosed(_ id: CGWindowID, pid: pid_t, attempt: Int) {
+        guard closedByApp[id] == nil, let p = proxies[id], p.pid == pid, WindowList.exists(id) else { return }
+        AXQueue.background.async { [weak self] in
+            let named = AXWindow.names(windowID: id, pid: pid)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if named == false, let p = self.proxies[id], p.pid == pid { self.closeForApp(p) }
+                    else if named != true { self.confirmClosed(id, pid: pid, attempt: attempt + 1) }
+                }
+            }
+        }
+    }
+
+    /// A window its app says it closed, though the window server still has it on screen: off the canvas
+    /// at the next listing, as a closed window is (`closedByApp`). The real window goes off the screen
+    /// first, natively, so that once the canvas lets go of it nothing of it shows over the desktop.
+    private func closeForApp(_ p: WindowProxy) {
+        let id = p.windowID
+        guard closedByApp[id] == nil, WindowList.exists(id) else { return }
+        if lastActiveProxy === p, askedKept == id { askedKept = nil }
+        let listed = WindowList.onScreen(id)
+        var parked = listed == nil ? ", already off the screen" : ""
+        var home: CGPoint?
+        if let listed, renderer == .realWindows, additionNumber >= 15 {
+            let origin = CGPoint(x: listed.bounds.minX, y: display.frame.maxY + 4000)
+            if moveNativelyNow(p, to: origin) {
+                home = listed.bounds.origin
+                parked = ", moved off the screen from \(listed.bounds.origin)"
+            }
+        }
+        closedByApp[id] = (p.pid, CACurrentMediaTime(), home)
+        Log.note("Closed: \(p.appName) — \(p.title) (window \(id)) is no longer one of its app's windows, though the window server still has it — off the canvas\(parked)")
+        scheduleDiff()
+    }
+
+    /// A window `closeForApp` moved off the screen, natively back where it was. True if it moved.
+    @discardableResult
+    private func bringHome(_ id: CGWindowID, _ home: CGPoint?) -> Bool {
+        guard let home, WindowList.exists(id),
+              LiveWindowsConnection.command(LiveWindowsWire.move(id, x: Int32(home.x.rounded()), y: Int32(home.y.rounded()))) else { return false }
+        Log.note("Closed: window \(id) back on the screen natively at \(home)")
+        return true
+    }
+
+    /// The app in front, looked over every `frontSweepInterval` for windows on the canvas it has closed
+    /// without the canvas hearing of it: closed with ⌘W while used where it's drawn at a zoom (nothing
+    /// watches its windows then), by the app itself, or a window other than the one entered. A window
+    /// that leaves the screen is caught by the listing; one its app keeps on screen, or keeps alive off
+    /// it, is caught here. Only windows the app once named are looked at, and only the handle the canvas
+    /// already has is asked about: the app is asked for its windows only when one of those handles has
+    /// gone dead (`isDestroyed`), which is the app's own word that the window is no more. A window gone
+    /// native full screen keeps its handle, so it is never taken for one closed.
+    private func sweepFrontApp() {
+        let now = CACurrentMediaTime()
+        guard !frontSweeping, now - frontSweptAt >= CanvasController.frontSweepInterval,
+              let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, front != myPID else { return }
+        if sweep(front) { frontSweptAt = now }
+    }
+
+    /// An app that just lost the front (to the canvas, or to another app) is looked over once more: a
+    /// window of it closed within the last `frontSweepInterval` would otherwise never be, the sweep
+    /// only ever looking at the app in front.
+    func appDeactivated(_ pid: pid_t, attempt: Int = 0) {
+        guard pid != myPID, attempt < 4 else { return }
+        // Its last word on the way out (a window closing as it went) is in by a beat later. A look at
+        // another app still under way: this one waits its turn rather than being dropped.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.frontSweeping else { _ = self?.sweep(pid); return }
+                self.appDeactivated(pid, attempt: attempt + 1)
+            }
+        }
+    }
+
+    /// One look over `pid`'s windows on the canvas (`sweepFrontApp`). False when there was nothing to
+    /// look at, or a look is already under way.
+    @discardableResult
+    private func sweep(_ front: pid_t) -> Bool {
+        guard !frontSweeping else { return false }
+        let handles = proxies.values.filter { $0.pid == front && $0.kind == .window && closedByApp[$0.windowID] == nil }
+            .compactMap { p in p.ax.map { (id: p.windowID, ax: $0) } }
+        guard !handles.isEmpty else { return false }
+        frontSweeping = true
+        CanvasController.sweepQueue.async { [weak self] in
+            let dead = handles.filter { $0.ax.isDestroyed }
+            // A dead handle for a window the app still names (some apps make a new one for the same
+            // window): the new handle is kept instead.
+            let named = dead.isEmpty ? nil : AXWindow.windowsByID(pid: front)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.frontSweeping = false
+                    guard let named else { return }
+                    for (id, _) in dead {
+                        guard let p = self.proxies[id], p.pid == front else { continue }
+                        if let fresh = named[id] {
+                            p.ax = fresh
+                        } else if p === self.activeProxy, !NSApp.isActive {
+                            self.enteredWindowDestroyed(pid: front)   // closed, and the canvas may have to come back
+                        } else {
+                            self.closeForApp(p)
+                        }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    /// Windows closed by their app but still kept by the window server, on screen or not: forgotten as
+    /// such once the window server lets them go (a window that turns up again is new), or once the app
+    /// names them again (reopened), asked off the main thread every `closedRecheck` seconds.
+    private func recheckClosedByApp(listed list: [WindowInfo]) {
+        guard !closedByApp.isEmpty else { return }
+        let now = CACurrentMediaTime()
+        for (id, entry) in closedByApp {
+            guard list.contains(where: { $0.id == id }) || WindowList.exists(id) else {
+                closedByApp[id] = nil
+                continue
+            }
+            guard now - entry.asked >= CanvasController.closedRecheck, askingClosed.insert(id).inserted else { continue }
+            let pid = entry.pid
+            closedByApp[id] = (pid, now, entry.home)
+            AXQueue.background.async { [weak self] in
+                let named = AXWindow.names(windowID: id, pid: pid)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.askingClosed.remove(id)
+                        guard named == true, let entry = self.closedByApp.removeValue(forKey: id) else { return }
+                        Log.note("Closed: window \(id) is one of its app's windows again — back on the canvas")
+                        self.bringHome(id, entry.home)
+                        self.scheduleDiff()
                     }
                 }
             }
@@ -6968,7 +7208,7 @@ final class CanvasController {
         let id = AXWindow(element: element, pid: pid).windowID
         if let id { minimizing[id] = CACurrentMediaTime() }
         guard id == nil || id == p.windowID else { return }
-        NSLog("Entered window minimized — into the Dock, its place on the canvas kept")
+        Log.note("Entered window minimized — into the Dock, its place on the canvas kept")
         returnOnceOffScreen(p, until: CACurrentMediaTime() + CanvasController.genieWait)
     }
 
@@ -7022,7 +7262,7 @@ final class CanvasController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self, !NSApp.isActive else { return }
             if NSWorkspace.shared.frontmostApplication?.processIdentifier != self.activeProxy?.pid {
-                NSLog("Entered app hid or quit — back to the canvas")
+                Log.note("Entered app hid or quit — back to the canvas")
                 self.showCanvas(fitAll: false)
             }
         }
@@ -7047,6 +7287,7 @@ final class CanvasController {
     /// only off the main thread.
     private func enteredTick() {
         guard let p = activeProxy, !NSApp.isActive, !handingOff else { return }
+        sweepFrontApp()
         if let front = NSWorkspace.shared.frontmostApplication,
            front.processIdentifier != p.pid, front.processIdentifier != myPID {
             foreignActivation(front)   // a missed activation
@@ -7072,7 +7313,7 @@ final class CanvasController {
     // MARK: Takeover — keys
 
     func handle(_ command: KeyTap.Command) {
-        NSLog("Key: \(command)")
+        Log.note("Key: \(command)")
         guard addingWidgets == nil, !isSetupShowing else { return }   // the desktop is in edit mode; Done comes back
         switch command {
         case .appSwitchBegin(let reverse): beginSwitcher(reverse: reverse)
@@ -7107,9 +7348,9 @@ final class CanvasController {
         // Global coordinates are top-left, as the view's points are from its display's corner.
         let point = CGPoint(x: global.x - display.frame.minX, y: global.y - display.frame.minY)
         guard let p = view.proxy(at: view.camera.toWorld(point)), p.kind == .window, p.pip == nil else {
-            return NSLog("Key: Mission Control key let go over no window; See All stays")
+            return Log.note("Key: Mission Control key let go over no window; See All stays")
         }
-        NSLog("Key: Mission Control key let go over \(p.appName) — \(p.title), entering it")
+        Log.note("Key: Mission Control key let go over \(p.appName) — \(p.title), entering it")
         view.highlight(nil)
         handoff(to: p)
     }
@@ -7118,8 +7359,8 @@ final class CanvasController {
     /// entered there instead of going off to a Space of its own. The canvas comes forward for it first.
     private func fillAndEnter() {
         guard let a = activeProxy, a.kind == .window else { return }
-        guard !Settings.stripMode else { return NSLog("Full screen: ⌃⌘F is off in strip mode") }
-        NSLog("Full screen: ⌃⌘F in \(a.appName) — \(a.title)")
+        guard !Settings.stripMode else { return Log.note("Full screen: ⌃⌘F is off in strip mode") }
+        Log.note("Full screen: ⌃⌘F in \(a.appName) — \(a.title)")
         pendingPlacement = { [weak self, weak a] in
             guard let self, let a, self.view.proxies.contains(where: { $0 === a }) else { return }
             self.tileChoice(a, .fullScreen)
@@ -7144,11 +7385,11 @@ final class CanvasController {
         pendingSwitcherCommit = false
         guard !cycle.isEmpty else {
             switcher = nil
-            NSLog("Switcher: nothing on the canvas to switch to")
+            Log.note("Switcher: nothing on the canvas to switch to")
             return
         }
         switcher = cycle
-        NSLog("Switcher: from \(current.map { "\($0.appName) — \($0.title)" } ?? "canvas"), \(cycle.apps.count) apps, \(windows.count) windows")
+        Log.note("Switcher: from \(current.map { "\($0.appName) — \($0.title)" } ?? "canvas"), \(cycle.apps.count) apps, \(windows.count) windows")
         showSwitcherHUD()
         if current == nil && !reverse {
             applySwitcherSelection()   // from the canvas the first app is the destination already
@@ -7464,7 +7705,7 @@ final class CanvasController {
             }
             let elsewhere = hypot(landed.x - origin.x, landed.y - origin.y) > 1
             if elsewhere { p.placedNatively(at: CGRect(origin: landed, size: size)) }
-            NSLog("Scaled use: \(p.appName) — \(p.title) natively under the pointer for its gesture, \(origin)\(elsewhere ? " — landed at \(landed)" : "")")
+            Log.note("Scaled use: \(p.appName) — \(p.title) natively under the pointer for its gesture, \(origin)\(elsewhere ? " — landed at \(landed)" : "")")
         }
     }
     /// The apps that came to the front while the pointer was through to one of their windows (a click
@@ -7649,7 +7890,7 @@ final class CanvasController {
     func move(_ p: WindowProxy, to target: CanvasController) {
         guard p.kind == .window, target !== self, !handingOff, restoring == nil, addingWidgets == nil,
               proxies[p.windowID] === p else { return }
-        NSLog("Displays: \(p.appName) — \(p.title) to \(target.display.name)")
+        Log.note("Displays: \(p.appName) — \(p.title) to \(target.display.name)")
         if p.pip != nil { endPip(p) }   // a tile is this screen's
         // A leased window goes back first: its transform places it in screen points, and a window moved
         // under it would be put back where it was when the lease let go of it.
@@ -7659,7 +7900,7 @@ final class CanvasController {
         desk?.move(id, from: self, to: target, listing: false)
         AXQueue.interactive.async { [weak self, weak target] in
             let ax = known ?? AXWindow.find(windowID: id, pid: pid, approximateFrame: approx)
-            if ax?.setPosition(point) != true { NSLog("Displays: window \(id) didn't move (Accessibility granted?)") }
+            if ax?.setPosition(point) != true { Log.note("Displays: window \(id) didn't move (Accessibility granted?)") }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     target?.scheduleDiff()
@@ -7679,7 +7920,7 @@ final class CanvasController {
                   let i = Display.index(for: frame, in: displays) else { return }
             let to = displays[((i + step) % displays.count + displays.count) % displays.count]
             ax.setPosition(CanvasController.centred(frame.size, in: to.visible))
-            NSLog("Displays: \(app.localizedName ?? "?")'s window to \(to.name)")
+            Log.note("Displays: \(app.localizedName ?? "?")'s window to \(to.name)")
         }
     }
 
@@ -7732,7 +7973,7 @@ final class CanvasController {
         let old = display
         guard new != old else { return }
         display = new
-        if new.frame != old.frame { NSLog("Displays: \(new.name) is at \(new.frame) (was \(old.frame))") }
+        if new.frame != old.frame { Log.note("Displays: \(new.name) is at \(new.frame) (was \(old.frame))") }
         window.setFrame(new.cocoaFrame, display: true)
         backdrop?.setFrame(new.cocoaFrame, display: false)
         pipChrome.move(to: new)
@@ -7756,7 +7997,7 @@ final class CanvasController {
 
     /// The display went away: the canvas stops for good, its windows already on their way to another.
     func retire() {
-        NSLog("Displays: \(display.name) is gone; its canvas closes")
+        Log.note("Displays: \(display.name) is gone; its canvas closes")
         view.cancelAnimation()
         closeSwitcher(clearHighlight: true)
         leaveEntered(reconcile: false)

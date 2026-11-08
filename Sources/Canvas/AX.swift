@@ -39,6 +39,10 @@ struct AXWindow: @unchecked Sendable {
     }
 
     static func find(windowID: CGWindowID, pid: pid_t, approximateFrame: CGRect) -> AXWindow? {
+        Watchdog.during("Accessibility: finding a window (AXWindow.find)") { findNow(windowID: windowID, pid: pid, approximateFrame: approximateFrame) }
+    }
+
+    private static func findNow(windowID: CGWindowID, pid: pid_t, approximateFrame: CGRect) -> AXWindow? {
         let app = application(pid, timeout: 1.0)
 
         var value: CFTypeRef?
@@ -62,7 +66,40 @@ struct AXWindow: @unchecked Sendable {
     }
 
     /// The window the app is focused on, or nil if it has none yet (just launched, or a menu-bar app).
+    /// Whether the app names the window among its windows; nil when it doesn't answer (busy, quitting,
+    /// or with no Accessibility at all), which is never taken for a no.
+    static func names(windowID: CGWindowID, pid: pid_t) -> Bool? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application(pid, timeout: 1.0), kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return nil }
+        return windows.contains { AXWindow(element: $0, pid: pid).windowID == windowID }
+    }
+
+    /// The app's windows by window ID; nil when it doesn't answer.
+    static func windowsByID(pid: pid_t) -> [CGWindowID: AXWindow]? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application(pid, timeout: 1.0), kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return nil }
+        var byID: [CGWindowID: AXWindow] = [:]
+        for element in windows {
+            let w = AXWindow(element: element, pid: pid)
+            if let id = w.windowID { byID[id] = w }
+        }
+        return byID
+    }
+
+    /// Whether the app has destroyed this handle's window, as far as Accessibility goes: only an answer
+    /// of "invalid element" says so. A slow or silent app, or one that answers anything at all, says no.
+    var isDestroyed: Bool {
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .invalidUIElement
+    }
+
     static func focusedWindow(pid: pid_t) -> AXWindow? {
+        Watchdog.during("Accessibility: an app's focused window (AXWindow.focusedWindow)") { focusedWindowNow(pid: pid) }
+    }
+
+    private static func focusedWindowNow(pid: pid_t) -> AXWindow? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(application(pid), kAXFocusedWindowAttribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
@@ -74,7 +111,7 @@ struct AXWindow: @unchecked Sendable {
         return _AXUIElementGetWindow(element, &id) == .success ? id : nil
     }
 
-    var frame: CGRect? { element.frame }
+    var frame: CGRect? { Watchdog.during("Accessibility: a window's frame (AXWindow.frame)") { element.frame } }
 
     /// Native fullscreen: the window lives on its own Space and refuses to be moved.
     var isFullScreen: Bool { element.bool("AXFullScreen") }
@@ -90,7 +127,9 @@ struct AXWindow: @unchecked Sendable {
     /// Into the Dock, as ⌘M or the yellow button would.
     @discardableResult
     func minimize() -> Bool {
-        AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success
+        Watchdog.during("Accessibility: minimize (AXWindow.minimize)") {
+            AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success
+        }
     }
 
     @discardableResult
@@ -114,8 +153,10 @@ struct AXWindow: @unchecked Sendable {
 
     /// Brings this window to the front *within its app*. Activating the app then makes it frontmost overall.
     func raise() {
-        AXUIElementPerformAction(element, kAXRaiseAction as CFString)
-        AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
+        Watchdog.during("Accessibility: raise (AXWindow.raise)") {
+            AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
+        }
     }
 
     /// Where the window's red, yellow and green buttons are (`TrafficLights.Layout`), from their frames;
@@ -138,6 +179,10 @@ struct AXWindow: @unchecked Sendable {
     /// (a palette, a sheet) or the app refused.
     @discardableResult
     func close() -> Bool {
+        Watchdog.during("Accessibility: close (AXWindow.close)") { closeNow() }
+    }
+
+    private func closeNow() -> Bool {
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &ref) == .success,
               let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return false }

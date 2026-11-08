@@ -94,7 +94,7 @@ enum MoveToApplications {
         let situation = currentSituation()
         switch verdict(for: situation) {
         case .stay(let why):
-            NSLog("Move: staying in \(situation.bundlePath) (\(why))")
+            Log.note("Move: staying in \(situation.bundlePath) (\(why))")
             return false
         case .offer(let place):
             return offer(from: place, situation: situation)
@@ -153,7 +153,7 @@ enum MoveToApplications {
         removeQuarantine(destination)
         if trashesDownloads, let original {
             do { try fm.trashItem(at: original, resultingItemURL: nil) } catch {
-                NSLog("Move: couldn't put the Downloads copy in the Trash — \(error.localizedDescription)")
+                Log.note("Move: couldn't put the Downloads copy in the Trash — \(error.localizedDescription)")
             }
         }
         SetupJournal.note("Move: copied to \(destination.path); opening it")
@@ -171,7 +171,7 @@ enum MoveToApplications {
     @MainActor
     private static func leave(for bundle: URL) -> Bool {
         guard AppRelaunch.open(bundle, afterQuitOf: ProcessInfo.processInfo.processIdentifier) else {
-            NSLog("Move: couldn't arrange the relaunch; staying")
+            Log.note("Move: couldn't arrange the relaunch; staying")
             return false
         }
         NSApp.terminate(nil)
@@ -188,7 +188,7 @@ enum MoveToApplications {
             try task.run()
             task.waitUntilExit()
         } catch {
-            NSLog("Move: xattr — \(error.localizedDescription)")
+            Log.note("Move: xattr — \(error.localizedDescription)")
         }
     }
 
@@ -214,7 +214,7 @@ enum AppRelaunch {
         do {
             try task.run()
         } catch {
-            NSLog("Relaunch: couldn't start the shell — \(error.localizedDescription)")
+            Log.note("Relaunch: couldn't start the shell — \(error.localizedDescription)")
             return false
         }
         return true

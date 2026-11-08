@@ -16,7 +16,7 @@ enum LegacyMigration {
             // Anything Sunlight already wrote wins over the old value.
             let current = defaults.persistentDomain(forName: bundleID) ?? [:]
             defaults.setPersistentDomain(old.merging(current) { _, new in new }, forName: bundleID)
-            NSLog("Migration: copied \(old.count) settings from \(legacyBundleID)")
+            Log.note("Migration: copied \(old.count) settings from \(legacyBundleID)")
         }
         copySupportFolder()
         defaults.set(true, forKey: doneKey)
@@ -37,9 +37,9 @@ enum LegacyMigration {
         try? fm.createDirectory(at: new.deletingLastPathComponent(), withIntermediateDirectories: true)
         do {
             try fm.copyItem(at: old, to: new)
-            NSLog("Migration: copied \(old.path) to \(new.path)")
+            Log.note("Migration: copied \(old.path) to \(new.path)")
         } catch {
-            NSLog("Migration: couldn't copy \(old.path) — \(error.localizedDescription)")
+            Log.note("Migration: couldn't copy \(old.path) — \(error.localizedDescription)")
         }
     }
 }

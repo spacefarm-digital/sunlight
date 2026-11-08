@@ -121,7 +121,7 @@ enum Spaces {
               let cid = dlsym(handle, "SLSMainConnectionID"),
               let copy = dlsym(handle, "SLSCopyManagedDisplaySpaces"),
               let forWindows = dlsym(handle, "SLSCopySpacesForWindows") else {
-            NSLog("Spaces: SkyLight's Space calls aren't available")
+            Log.note("Spaces: SkyLight's Space calls aren't available")
             return nil
         }
         return SkyLight(cid: unsafeBitCast(cid, to: MainConnection.self)(),
@@ -204,7 +204,7 @@ enum Spaces {
         let plan = fold(displays, windows: windows.map { ($0.id, spaces(of: $0.id)) })
         guard !plan.isEmpty else { return .nothingToFold }
         guard mover.isAvailable else {
-            NSLog("Spaces: \(plan.removals.count) other Desktop(s) to fold, but the add-on in the Dock can't move windows between Desktops (sunlight-55 can)")
+            Log.note("Spaces: \(plan.removals.count) other Desktop(s) to fold, but the add-on in the Dock can't move windows between Desktops (sunlight-55 can)")
             return .unavailable
         }
         let moving = Set(plan.moves.map(\.window))
@@ -216,7 +216,7 @@ enum Spaces {
         }
         var removed = 0
         for desktop in plan.removals where mover.remove(desktop) { removed += 1 }
-        NSLog("Spaces: folded \(moved) window(s) and removed \(removed) of \(plan.removals.count) Desktop(s)")
+        Log.note("Spaces: folded \(moved) window(s) and removed \(removed) of \(plan.removals.count) Desktop(s)")
         return moved == plan.moves.count && removed == plan.removals.count ? .folded(moved: moved, removed: removed) : .failed
     }
 }
@@ -248,10 +248,10 @@ final class DockSpaces: Spaces.Mover, @unchecked Sendable {
 
     private func answer(_ message: Data, _ what: String) -> Bool {
         guard let status = LiveWindowsConnection.answered(message) else {
-            NSLog("Spaces: no answer from the Dock \(what)")
+            Log.note("Spaces: no answer from the Dock \(what)")
             return false
         }
-        if status != 0 { NSLog("Spaces: the Dock refused \(what): \(LiveWindowsConnection.reason(for: status))") }
+        if status != 0 { Log.note("Spaces: the Dock refused \(what): \(LiveWindowsConnection.reason(for: status))") }
         return status == 0
     }
 }

@@ -385,6 +385,23 @@ enum Settings {
     /// Posted when Settings › Canvas › Window names is switched: the canvas shows or hides the labels.
     static let windowLabelsDidChange = Notification.Name("CanvasWindowLabelsDidChange")
 
+    // MARK: Zoom level
+
+    private static let zoomReadoutKey = "ZoomReadout"
+
+    /// Whether the zoom level ("41%") is shown in the canvas's top-left corner, with the `PerfLog` line
+    /// under it when that's on. On until it's turned off.
+    static var showZoomReadout: Bool {
+        get { UserDefaults.standard.object(forKey: zoomReadoutKey) == nil || UserDefaults.standard.bool(forKey: zoomReadoutKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: zoomReadoutKey)
+            NotificationCenter.default.post(name: zoomReadoutDidChange, object: nil)
+        }
+    }
+
+    /// Posted when Settings › Canvas › Zoom level is switched: the canvas shows or hides the readout.
+    static let zoomReadoutDidChange = Notification.Name("CanvasZoomReadoutDidChange")
+
     // MARK: The desktop
 
     private static let desktopFloorKey = "DesktopFloor"
@@ -1060,6 +1077,11 @@ final class SettingsModel: ObservableObject {
         Settings.showWindowLabels = on
     }
 
+    func setZoomReadout(_ on: Bool) {
+        objectWillChange.send()
+        Settings.showZoomReadout = on
+    }
+
     func setDesktopFiles(_ on: Bool) {
         objectWillChange.send()
         onDesktopFilesChange?(on)
@@ -1290,6 +1312,10 @@ private struct CanvasPane: View {
                     RowLabel(title: "Window names",
                              subtitle: "Each window’s name above it, zoomed out.")
                 }
+                Toggle(isOn: model.bind({ Settings.showZoomReadout }, { model.setZoomReadout($0) })) {
+                    RowLabel(title: "Zoom level",
+                             subtitle: "How far you’re zoomed, in the top corner.")
+                }
                 Toggle(isOn: model.bind({ Settings.showDesktopFloor }, { model.setDesktopFiles($0) })) {
                     RowLabel(title: "Desktop files",
                              subtitle: "Your desktop files, under the windows.")
@@ -1330,6 +1356,7 @@ private struct CanvasPane: View {
         parts.append(Settings.showMinimap ? "Minimap on." : "No minimap.")
         if Settings.showDesktopFloor { parts.append("Desktop files on.") }
         if !Settings.showWindowLabels { parts.append("No window names.") }
+        if !Settings.showZoomReadout { parts.append("No zoom level.") }
         return parts.joined(separator: " ")
     }
 }

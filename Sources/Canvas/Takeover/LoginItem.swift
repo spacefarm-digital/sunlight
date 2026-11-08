@@ -15,11 +15,11 @@ enum LoginItem {
         do {
             try service.register()
         } catch {
-            NSLog("Login item: register failed — \(error.localizedDescription)")
+            Log.note("Login item: register failed — \(error.localizedDescription)")
             return
         }
         let status = service.status
-        NSLog("Login item: \(describe(status))")
+        Log.note("Login item: \(describe(status))")
         if status == .requiresApproval {
             DispatchQueue.main.async { SMAppService.openSystemSettingsLoginItems() }
         }
@@ -31,7 +31,7 @@ enum LoginItem {
         do {
             try service.unregister()
         } catch {
-            NSLog("Login item: unregister failed — \(error.localizedDescription)")
+            Log.note("Login item: unregister failed — \(error.localizedDescription)")
         }
     }
 

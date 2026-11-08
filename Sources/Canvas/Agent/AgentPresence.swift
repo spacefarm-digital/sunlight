@@ -136,7 +136,7 @@ final class AgentPresence: NSObject {
             panel.setOutline(nil, animated: false)
         }
         startLink()
-        NSLog("Tell Sunlight: showing what it does on \(panels.count) display(s)")
+        Log.note("Tell Sunlight: showing what it does on \(panels.count) display(s)")
     }
 
     /// Finished, failed or stopped: everything fades out after a moment to see the last step land.

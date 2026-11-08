@@ -373,6 +373,17 @@ consent step, the system changes or the login item, so the Dock and Finder aren'
 run. `scripts/smoke-takeover.sh` drives TextEdit through the main flows and prints which app is
 frontmost after each step (run it while you're at the keyboard: a locked screen makes every step fail).
 
+If Sunlight ends without quitting (a crash, a force quit, `kill -9`), its guard puts the same values back
+straight away: `Sunlight --guard <pid>`, started at launch in a session of its own (so a second
+"Sunlight" shows in Activity Monitor), waits for the app's process to exit, and when the app's mark in
+the defaults is still there (`Stability`), records the run and reverts takeover's prefs and Stage
+Manager as a quit would. The opt-in and the login item stay. Two unexpected ends in a row, each within
+90 s of opening, make the next launch safe mode: no takeover, no live windows (capture stills, no quiet
+add-on loads), for that launch only. The runs, the main-thread watchdog's stalls (`Watchdog`, over
+500 ms, named when inside a known wait: the Dock's handoff ack, an Accessibility call, an add-on
+command) and the crash reports are in Diagnose's Stability section; `defaults write
+com.spacefarm.sunlight StallWatch -bool NO` turns the watchdog off.
+
 Escape hatches, for when the app itself won't launch:
 
 ```

@@ -55,10 +55,10 @@ enum LiveWindowsService {
             try service.register()
         } catch {
             // Registering an already-registered daemon that awaits approval throws; the status says more.
-            NSLog("Live windows: daemon register — \(error.localizedDescription)")
+            Log.note("Live windows: daemon register — \(error.localizedDescription)")
         }
         let after = state
-        NSLog("Live windows: daemon \(after)")
+        Log.note("Live windows: daemon \(after)")
         if after == .needsApproval {
             DispatchQueue.main.async { SMAppService.openSystemSettingsLoginItems() }
         }
@@ -68,7 +68,7 @@ enum LiveWindowsService {
     static func unregister() {
         guard state == .enabled || state == .needsApproval else { return }
         do { try service.unregister() } catch {
-            NSLog("Live windows: daemon unregister failed — \(error.localizedDescription)")
+            Log.note("Live windows: daemon unregister failed — \(error.localizedDescription)")
         }
     }
 

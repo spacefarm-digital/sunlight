@@ -35,7 +35,7 @@ enum AgentKey {
         q[kSecValueData as String] = Data(key.utf8)
         q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
         let status = SecItemAdd(q as CFDictionary, nil)
-        if status != errSecSuccess { NSLog("Tell Sunlight: couldn't save the API key (\(status))") }
+        if status != errSecSuccess { Log.note("Tell Sunlight: couldn't save the API key (\(status))") }
         return status == errSecSuccess
     }
 

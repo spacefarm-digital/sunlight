@@ -85,7 +85,7 @@ final class PerfMonitor: @unchecked Sendable {
         if !w.roundTrips.isEmpty { parts.append("dock " + PerfMonitor.describe(w.roundTrips) + " ×\(w.roundTrips.count)") }
         parts.append(String(format: "%.0f MB", Double(PerfMonitor.footprint()) / 1_048_576))
         let line = parts.joined(separator: " · ")
-        NSLog("Perf: " + line)
+        Log.note("Perf: " + line)
         onSummary?(line)
     }
 

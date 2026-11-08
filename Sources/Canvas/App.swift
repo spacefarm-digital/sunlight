@@ -4,6 +4,11 @@ import Carbon.HIToolbox
 @main
 enum CanvasApp {
     @MainActor static func main() {
+        // The guard `Stability.startGuard` starts beside the app: it only waits for the app to exit.
+        if let index = CommandLine.arguments.firstIndex(of: "--guard"), index + 1 < CommandLine.arguments.count,
+           let parent = pid_t(CommandLine.arguments[index + 1]) {
+            Stability.guardMain(parent: parent)
+        }
         LegacyMigration.run()
         // A Mac already set up for live windows (SIP partly off, boot argument set) that gets this build
         // isn't a fresh install: no preview mode for it.
@@ -51,6 +56,11 @@ enum CanvasApp {
             reviewScenario = scenario
         }
 
+        if reviewScenario == nil {
+            let info = Bundle.main.infoDictionary ?? [:]
+            Log.note("Startup: Sunlight \(info["CFBundleShortVersionString"] as? String ?? "dev") (\(info["CFBundleVersion"] as? String ?? "-")), pid \(getpid()), \(ProcessInfo.processInfo.operatingSystemVersionString)")
+            Stability.launched()
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         delegate.reviewScenario = reviewScenario
@@ -99,6 +109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Opened from the disk image or Downloads: the offer to move to Applications comes first, and if
         // this copy goes, nothing else comes up.
         if MoveToApplications.offerIfNeeded() { return }
+        Watchdog.shared.start()
+        Stability.startGuard()
+        DispatchQueue.global(qos: .utility).async { CrashReports.collect() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Stability.settleTime) { MainActor.assumeIsolated { Stability.settle() } }
         AXWindow.installGlobalTimeout(1)
         updater = Updater()
         updater?.onFoundUpdate = { [weak self] version in self?.menuBar?.model.updateVersion = version }
@@ -117,7 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var displayPoll: Timer?
 
     private func waitForDisplay() {
-        NSLog("Startup: no display listed yet; waiting for one before opening the canvas")
+        Log.note("Startup: no display listed yet; waiting for one before opening the canvas")
         displayWait = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                              object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.displayMayHaveCome() }
@@ -134,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         displayWait = nil
         displayPoll?.invalidate()
         displayPoll = nil
-        NSLog("Startup: a display is listed now; opening the canvas")
+        Log.note("Startup: a display is listed now; opening the canvas")
         startCanvas()
     }
 
@@ -147,6 +161,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         canvas.onHowToUse = { [weak self] in self?.showInstructions(chapter: nil) }
         // A display more or fewer: ⌃⌥⇧ → ← are Sunlight's only while there's somewhere to move to.
         canvas.onDisplaysChanged = { [weak self] in self?.experimentalFeaturesChanged() }
+        // At launch the add-on usually isn't answering yet (quitting restarted the Dock) and the setup
+        // status says so; once the canvas has reloaded it, the menu bar shouldn't go on saying setup is unfinished.
+        canvas.onLiveWindowsAnswering = { [weak self] in self?.setup?.recheck() }
         menuBar = makeMenuBar(for: canvas)
         if Settings.sunlightOn { installHotkeys(for: canvas) }
         NotificationCenter.default.addObserver(forName: Settings.experimentalFeaturesDidChange, object: nil, queue: .main) { [weak self] _ in
@@ -190,6 +207,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // After the earlier copy has quit, which turns Stage Manager back on as it goes. Not before
             // the open-at-login page of setup, which says so first.
             if SetupRecord.loginItemChosen { StageManager.turnOff(why: "launch") }
+            if Stability.safeMode {
+                // No takeover this launch; whatever an earlier run left applied goes back.
+                let restored = TakeoverMode.revertPrefs()
+                Log.note("Takeover: not this launch (safe mode)\(restored.isEmpty ? "" : "; put back \(restored.sorted().joined(separator: ", "))")")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { Stability.announceSafeMode() } }
+                return
+            }
             self?.takeover?.startup()
             if !Settings.sunlightOn { self?.takeover?.suspendInput() }
         }
@@ -209,7 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Not while the setup window is up: its sheet would land behind it. The window asks again as it closes.
     private func askForConsentIfNeeded() {
-        guard !askedConsent, setup?.isShowing != true, Settings.sunlightOn, let takeover, takeover.wantsConsent else { return }
+        guard !askedConsent, setup?.isShowing != true, Settings.sunlightOn, !Stability.safeMode, let takeover, takeover.wantsConsent else { return }
         askedConsent = true
         takeover.askForConsent()
     }
@@ -221,6 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         canvas?.remember()
         takeover?.revertForTermination(quit: NSAppleEventManager.shared().currentAppleEvent)
         StageManager.restore()
+        Stability.quitCleanly()
         return .terminateNow
     }
 
@@ -345,7 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         actions.saveLayout = { [weak self] in self?.saveLayout() }
         actions.deleteLayout = { [weak self] name in
             LayoutStore.delete(name: name)
-            NSLog("Layout: deleted “\(name)”")
+            Log.note("Layout: deleted “\(name)”")
             self?.rebuildLayoutsMenu()
         }
         actions.toggleStrip = { [weak canvas] in canvas?.toggleStripMode() }
@@ -644,7 +669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func deleteLayout(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         LayoutStore.delete(name: name)
-        NSLog("Layout: deleted “\(name)”")
+        Log.note("Layout: deleted “\(name)”")
         rebuildLayoutsMenu()
     }
 
@@ -764,13 +789,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         canvas?.shutdown()
         if takeover?.isRunning == true { takeover?.revert(reason: .leaveMode) } else { TakeoverMode.revertPrefs() }
         StageManager.restore()
+        // Before the settings go: with them goes the record this writes.
+        Stability.quitCleanly()
         if removingData { UninstallFlow.removeUserData() }
         let bundle = Bundle.main.bundleURL
         guard bundle.pathExtension == "app" else { exit(0) }
         NSWorkspace.shared.recycle([bundle]) { _, error in
             DispatchQueue.main.async {
                 guard let error else { exit(0) }
-                NSLog("Uninstall: couldn't move \(bundle.path) to the Trash — \(error.localizedDescription)")
+                Log.note("Uninstall: couldn't move \(bundle.path) to the Trash — \(error.localizedDescription)")
                 let alert = NSAlert()
                 alert.messageText = "Sunlight couldn't move itself to the Trash"
                 alert.informativeText = "Drag it there from its folder once it has quit. (\(error.localizedDescription))"
@@ -841,7 +868,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func setCaptureMethod(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let method = CaptureMethod(rawValue: raw) else { return }
         Settings.captureMethod = method
-        NSLog("OneShotCapture: method set to \(method.title)")
+        Log.note("OneShotCapture: method set to \(method.title)")
     }
 
     /// Loads the live-window addition into the Dock with an administrator prompt, after a Dock restart

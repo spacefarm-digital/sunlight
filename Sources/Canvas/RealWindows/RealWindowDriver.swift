@@ -88,10 +88,10 @@ final class RealWindowDriver: @unchecked Sendable {
             let status = try leased.request(data)
             if status != 0 {
                 shadowDeclined = true
-                NSLog("Rendering: the add-on declined a shadow request (\(LiveWindowsConnection.reason(for: status))); this window's seams are left to AppKit")
+                Log.note("Rendering: the add-on declined a shadow request (\(LiveWindowsConnection.reason(for: status))); this window's seams are left to AppKit")
             }
         } catch {
-            NSLog("Rendering: a shadow request failed (\(error.localizedDescription))")
+            Log.note("Rendering: a shadow request failed (\(error.localizedDescription))")
         }
     }
 
@@ -102,10 +102,10 @@ final class RealWindowDriver: @unchecked Sendable {
             let status = try leased.request(LiveWindowsWire.alpha(alphas.map { ($0.key, $0.value) }))
             if status != 0 {
                 alphaDeclined = true
-                NSLog("Rendering: the add-on declined an alpha request (\(LiveWindowsConnection.reason(for: status))); windows open and close without fading")
+                Log.note("Rendering: the add-on declined an alpha request (\(LiveWindowsConnection.reason(for: status))); windows open and close without fading")
             }
         } catch {
-            NSLog("Rendering: an alpha request failed (\(error.localizedDescription))")
+            Log.note("Rendering: an alpha request failed (\(error.localizedDescription))")
         }
     }
 
@@ -115,9 +115,9 @@ final class RealWindowDriver: @unchecked Sendable {
         guard !pinned.isEmpty, pinsInDock else { return }
         do {
             let status = try leased.request(LiveWindowsWire.pin(pinned))
-            if status != 0 { NSLog("Rendering: the add-on declined the pinned windows (\(LiveWindowsConnection.reason(for: status))); they show only while the canvas is up") }
+            if status != 0 { Log.note("Rendering: the add-on declined the pinned windows (\(LiveWindowsConnection.reason(for: status))); they show only while the canvas is up") }
         } catch {
-            NSLog("Rendering: the pin request failed (\(error.localizedDescription))")
+            Log.note("Rendering: the pin request failed (\(error.localizedDescription))")
         }
     }
 
@@ -132,10 +132,10 @@ final class RealWindowDriver: @unchecked Sendable {
                     let status = try leased.request(LiveWindowsWire.shape(id, radius: radius))
                     if status != 0, !shapeDeclinedLogged {
                         shapeDeclinedLogged = true
-                        NSLog("Rendering: the add-on declined a shape request (\(LiveWindowsConnection.reason(for: status))); tiles keep their windows' corners")
+                        Log.note("Rendering: the add-on declined a shape request (\(LiveWindowsConnection.reason(for: status))); tiles keep their windows' corners")
                     }
                 } catch {
-                    NSLog("Rendering: a shape request failed (\(error.localizedDescription))")
+                    Log.note("Rendering: a shape request failed (\(error.localizedDescription))")
                 }
             }
             if fresh { connection?.close(); connection = nil }
@@ -160,10 +160,10 @@ final class RealWindowDriver: @unchecked Sendable {
                         result = CGPoint(x: CGFloat(x), y: CGFloat(y))
                     } else if !anchorDeclinedLogged {
                         anchorDeclinedLogged = true
-                        NSLog("Rendering: the add-on declined an anchor request (\(LiveWindowsConnection.reason(for: status))); the app's own zoom anchors on the real frame")
+                        Log.note("Rendering: the add-on declined an anchor request (\(LiveWindowsConnection.reason(for: status))); the app's own zoom anchors on the real frame")
                     }
                 } catch {
-                    NSLog("Rendering: an anchor request failed (\(error.localizedDescription))")
+                    Log.note("Rendering: an anchor request failed (\(error.localizedDescription))")
                 }
             }
             let point = result
@@ -191,7 +191,7 @@ final class RealWindowDriver: @unchecked Sendable {
                 try leased.acknowledge(data)
                 PerfMonitor.shared.dockRoundTrip(CACurrentMediaTime() - started)
                 if full {   // TEMP diagnostics
-                    NSLog("Rendering: full frame acked in \(Int((CACurrentMediaTime() - started) * 1000)) ms, \(Int((CACurrentMediaTime() - submitted) * 1000)) ms after submit\(fresh ? " (fresh lease)" : "")")
+                    Log.note("Rendering: full frame acked in \(Int((CACurrentMediaTime() - started) * 1000)) ms, \(Int((CACurrentMediaTime() - submitted) * 1000)) ms after submit\(fresh ? " (fresh lease)" : "")")
                 }
                 if full { lastFull = data }
                 if let shadow { sendShadow(shadow, on: leased) }
@@ -203,7 +203,7 @@ final class RealWindowDriver: @unchecked Sendable {
                 // worth replacing, a few times — unless a restore has superseded the frame meanwhile.
                 guard !fresh, retries > 0, isCurrent(epoch) else { throw error }
                 retries -= 1
-                NSLog("Rendering: the live-window lease failed (\(error.localizedDescription)); taking a new one")
+                Log.note("Rendering: the live-window lease failed (\(error.localizedDescription)); taking a new one")
                 Thread.sleep(forTimeInterval: RealWindowDriver.leaseRetryDelay)
             }
         }
@@ -285,7 +285,7 @@ final class RealWindowDriver: @unchecked Sendable {
                  shadow: Data? = nil, keeping kept: [(CGWindowID, CGPoint)] = [], top: CGFloat? = nil, above: pid_t = 0,
                  pinned: [CGWindowID] = []) -> Bool {
         lock.lock(); generation += 1; pending = nil; pendingAlpha = [:]; scheduled = false; lock.unlock()
-        return queue.sync {
+        return Watchdog.during("the Dock's answer to a handoff or release (RealWindowDriver.restore)") { queue.sync {
             defer { connection?.close(); connection = nil }
             lastRestoreFailure = nil
             lastRestoreKept = false
@@ -325,7 +325,7 @@ final class RealWindowDriver: @unchecked Sendable {
                 lastRestoreFailure = error.localizedDescription
                 return false
             }
-        }
+        } }
     }
 
     /// Shadow requests one after the other, `interval` apart, on the lease in hand or one taken for

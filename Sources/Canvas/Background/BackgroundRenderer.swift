@@ -291,7 +291,7 @@ final class BackgroundRenderer {
 
     private func pictureFailed(generation gen: Int) {
         guard gen == generation else { return }
-        NSLog("Background: no picture for \(spec.source); showing the colour")
+        Log.note("Background: no picture for \(spec.source); showing the colour")
         levels = [:]
         dominantTint = nil
         styleThumbnails = nil

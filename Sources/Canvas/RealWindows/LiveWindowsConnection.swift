@@ -457,19 +457,25 @@ final class LiveWindowsConnection {
     /// the barrier: on return the window server has it.
     @discardableResult
     static func command(_ message: Data, path: String = socketPath) -> Bool {
-        do {
-            let socket = try LiveWindowsConnection(path: path)
-            defer { socket.close() }
-            try socket.send(message)
-            _ = try? socket.receive(1)   // nothing comes back; this waits for the close
-            return true
-        } catch { return false }
+        Watchdog.during("a command to the Dock add-on (LiveWindowsConnection.command)") {
+            do {
+                let socket = try LiveWindowsConnection(path: path)
+                defer { socket.close() }
+                try socket.send(message)
+                _ = try? socket.receive(1)   // nothing comes back; this waits for the close
+                return true
+            } catch { return false }
+        }
     }
 
     /// A request on its own connection that the add-on answers with a status byte (the Desktops op), or
     /// nil when nothing answered. Removing the Desktop you're on waits for the switch away from it, so
     /// this waits a second.
     static func answered(_ message: Data, path: String = socketPath) -> UInt8? {
+        Watchdog.during("a request to the Dock add-on (LiveWindowsConnection.answered)") { answeredNow(message, path: path) }
+    }
+
+    private static func answeredNow(_ message: Data, path: String) -> UInt8? {
         do {
             let socket = try LiveWindowsConnection(path: path, patience: 1)
             defer { socket.close() }

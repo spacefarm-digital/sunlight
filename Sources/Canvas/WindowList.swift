@@ -79,10 +79,20 @@ enum WindowList {
     /// Whether the pointer is on the Dock right now: on a window of the Dock's own at the Dock's level,
     /// as the window server has it. The canvas can't tell by itself, as the Dock sits in front of it.
     static func pointerOverDock() -> Bool {
-        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier,
-              let pointer = CGEvent(source: nil)?.location else { return false }
+        guard let pointer = CGEvent(source: nil)?.location else { return false }
+        return isOverDock(pointer)
+    }
+
+    /// Whether a global point (top-left origin) is on the Dock: on a window of the Dock's own at the
+    /// Dock's level, as the window server has it now.
+    static func isOverDock(_ point: CGPoint) -> Bool {
+        guard let dock = dockPID else { return false }
         let level = Int(CGWindowLevelForKey(.dockWindow))
-        return onScreen().contains { $0.pid == dock && $0.layer == level && $0.alpha > 0 && $0.bounds.contains(pointer) }
+        return onScreen().contains { $0.pid == dock && $0.layer == level && $0.alpha > 0 && $0.bounds.contains(point) }
+    }
+
+    static var dockPID: pid_t? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
     }
 
     private typealias GetWindowOwner = @convention(c) (Int32, CGWindowID, UnsafeMutablePointer<Int32>) -> Int32

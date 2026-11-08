@@ -356,7 +356,7 @@ enum WelcomeMusic {
                 engine.prepare()
                 try engine.start()
             } catch {
-                NSLog("Setup: welcome music couldn't start: \(error.localizedDescription)")
+                Log.note("Setup: welcome music couldn't start: \(error.localizedDescription)")
                 return
             }
             // Starts a moment from now on the host clock, so the start is known exactly; the sound

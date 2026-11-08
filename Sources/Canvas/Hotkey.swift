@@ -21,7 +21,7 @@ final class Hotkey {
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x4341_4E56) /* 'CANV' */, id: id)
         let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
-        if status != noErr { NSLog("Hotkey: RegisterEventHotKey failed (\(status))") }
+        if status != noErr { Log.note("Hotkey: RegisterEventHotKey failed (\(status))") }
     }
 
     deinit {

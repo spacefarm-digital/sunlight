@@ -36,7 +36,7 @@ final class DormancyMonitor {
            (session["CGSSessionScreenIsLocked"] as? Bool) == true {
             flags.insert(.screenLocked)
             asleep = true
-            NSLog("Dormancy: the screen is locked at launch — asleep")
+            Log.note("Dormancy: the screen is locked at launch — asleep")
         }
     }
 
@@ -50,7 +50,7 @@ final class DormancyMonitor {
     private func apply(_ flag: Flag, on: Bool, reason: String) {
         if on { flags.insert(flag) } else { flags.remove(flag) }
         let now = !flags.isEmpty
-        NSLog("Dormancy: \(reason) — \(now ? "asleep" : "awake")")
+        Log.note("Dormancy: \(reason) — \(now ? "asleep" : "awake")")
         guard now != asleep else { return }
         asleep = now
         onChange?(now)

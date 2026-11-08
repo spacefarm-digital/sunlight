@@ -87,7 +87,7 @@ enum SetupJournal {
     }
 
     nonisolated static func note(_ line: String) {
-        NSLog("Setup: \(line)")
+        Log.note("Setup: \(line)")
         guard let url else { return }
         let stamp = ISO8601DateFormatter().string(from: Date())
         let entry = "\(stamp)  \(line)\n"
@@ -101,7 +101,7 @@ enum SetupJournal {
                 try entry.write(to: url, atomically: true, encoding: .utf8)
             }
         } catch {
-            NSLog("Setup: couldn't write the journal — \(error.localizedDescription)")
+            Log.note("Setup: couldn't write the journal — \(error.localizedDescription)")
         }
     }
 

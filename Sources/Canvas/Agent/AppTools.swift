@@ -102,7 +102,7 @@ final class AppTools {
             text = String(text.prefix(Guardrails.maxSnapshotLength))
                 + "\n… cut here: too large to send whole. Use app_find, or app_snapshot with root_ref set to a region's ref."
         }
-        NSLog("Tell Sunlight: read \(read.handles.count) elements of \(window.app), \(refs.count) refs\(read.truncated ? ", cut short" : "")")
+        Log.note("Tell Sunlight: read \(read.handles.count) elements of \(window.app), \(refs.count) refs\(read.truncated ? ", cut short" : "")")
         return CanvasTools.Outcome(result: text, isError: false, step: nil)
     }
 
@@ -118,7 +118,7 @@ final class AppTools {
         let (matches, refs) = AppReader.find(read.root, id: id, role: input["role"] as? String ?? "",
                                              name: input["name"] as? String ?? "", limit: 20)
         remember(id, window: window, refs: refs, read: read)
-        NSLog("Tell Sunlight: found \(matches.count) in \(read.handles.count) elements of \(window.app)")
+        Log.note("Tell Sunlight: found \(matches.count) in \(read.handles.count) elements of \(window.app)")
         if matches.isEmpty {
             return CanvasTools.Outcome(result: "Nothing matches\(read.truncated ? " in the part of the window read" : ""). Try fewer words, another role, or app_snapshot.", isError: false, step: nil)
         }
@@ -218,7 +218,7 @@ final class AppTools {
         working(in: snap.window)
         let outcome = await AppReader.off { AppReader.perform(action, on: handle, text: text) }
         presence?.pressed(outcome.ok ? Self.press(for: action, text: text) : .failed)
-        NSLog("Tell Sunlight: \(action) on \(target.role) in \(snap.window.app) → \(outcome.ok ? "ok" : outcome.message)")
+        Log.note("Tell Sunlight: \(action) on \(target.role) in \(snap.window.app) → \(outcome.ok ? "ok" : outcome.message)")
         let step: String
         switch action {
         case "set_value", "type": step = "Typed into \(label) in \(snap.window.app)"

@@ -38,18 +38,18 @@ enum WindowServerEvents {
         guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW),
               let cid = dlsym(handle, "SLSMainConnectionID"),
               let register = dlsym(handle, "SLSRegisterConnectionNotifyProc") else {
-            NSLog("Window events: SkyLight's notifications aren't available; new windows wait for the listing")
+            Log.note("Window events: SkyLight's notifications aren't available; new windows wait for the listing")
             return false
         }
         let connection = unsafeBitCast(cid, to: MainConnectionID.self)()
         let registerProc = unsafeBitCast(register, to: Register.self)
         let error = registerProc(connection, handler, windowCreated, nil)
         guard error == 0 else {
-            NSLog("Window events: registering for new windows failed (\(error))")
+            Log.note("Window events: registering for new windows failed (\(error))")
             return false
         }
         let removed = registerProc(connection, handler, windowRemoved, nil)
-        if removed != 0 { NSLog("Window events: registering for removed windows failed (\(removed)); the listing finds them") }
+        if removed != 0 { Log.note("Window events: registering for removed windows failed (\(removed)); the listing finds them") }
         started = true
         return true
     }

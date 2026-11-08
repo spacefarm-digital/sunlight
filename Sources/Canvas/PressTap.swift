@@ -223,7 +223,7 @@ final class PressTap: @unchecked Sendable {
         guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
                                            options: .defaultTap, eventsOfInterest: mask,
                                            callback: PressTap.callback, userInfo: info) else {
-            NSLog("PressTap: tapCreate failed — Accessibility granted? Retrying in 3 s")
+            Log.note("PressTap: tapCreate failed — Accessibility granted? Retrying in 3 s")
             let retry = Timer(timeInterval: 3, repeats: false) { [weak self] _ in self?.installTap() }
             RunLoop.current.add(retry, forMode: .common)
             return
@@ -232,13 +232,13 @@ final class PressTap: @unchecked Sendable {
         let source = CFMachPortCreateRunLoopSource(nil, port, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
-        NSLog("PressTap: installed")
+        Log.note("PressTap: installed")
     }
 
     private func checkTap() {
         guard let port else { return }
         if !CFMachPortIsValid(port) {
-            NSLog("PressTap: port invalidated, reinstalling")
+            Log.note("PressTap: port invalidated, reinstalling")
             self.port = nil
             installTap()
         } else if !CGEvent.tapIsEnabled(tap: port) {
@@ -291,7 +291,7 @@ final class PressTap: @unchecked Sendable {
             }
             if phase != .changed {
                 let dropped = state.withLock { s -> Int in defer { if !s.pinching { s.scrollsInPinch = 0 } }; return s.scrollsInPinch }
-                NSLog("PressTap: gesture pinch phase \(rawPhase) by \(magnification) — \(taken ? "the canvas's" : "passed")\(dropped > 0 ? ", \(dropped) scrolls dropped" : "")")
+                Log.note("PressTap: gesture pinch phase \(rawPhase) by \(magnification) — \(taken ? "the canvas's" : "passed")\(dropped > 0 ? ", \(dropped) scrolls dropped" : "")")
             }
             guard taken else {
                 if appBegins { anchorFirst(event) }

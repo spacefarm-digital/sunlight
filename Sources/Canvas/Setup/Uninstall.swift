@@ -128,6 +128,8 @@ enum UninstallFlow {
         if let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             try? fm.removeItem(at: support.appendingPathComponent("Sunlight"))
         }
+        // The log and the crash reports kept beside it: they name apps and windows.
+        try? fm.removeItem(at: Log.folder)
     }
 }
 

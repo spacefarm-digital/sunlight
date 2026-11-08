@@ -6,16 +6,16 @@ enum Permissions {
     static func requestAccessibility() {
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         let trusted = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
-        NSLog("Accessibility: \(trusted ? "granted" : "not granted yet — enable it in System Settings › Privacy & Security › Accessibility")")
+        Log.note("Accessibility: \(trusted ? "granted" : "not granted yet — enable it in System Settings › Privacy & Security › Accessibility")")
     }
 
     /// Prompts for Screen Recording (needed by ScreenCaptureKit to stream window contents).
     /// macOS applies a newly granted Screen Recording permission only after the app is relaunched.
     static func requestScreenCapture() {
         if CGPreflightScreenCaptureAccess() {
-            NSLog("Screen Recording: granted")
+            Log.note("Screen Recording: granted")
         } else {
-            NSLog("Screen Recording: not granted yet — grant it, then relaunch")
+            Log.note("Screen Recording: not granted yet — grant it, then relaunch")
             CGRequestScreenCaptureAccess()
         }
     }

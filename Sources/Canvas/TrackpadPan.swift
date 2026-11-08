@@ -125,11 +125,11 @@ final class TrackpadPan: @unchecked Sendable {
 
     private func startDevices() {
         guard let mt else {
-            NSLog("TrackpadPan: MultitouchSupport unavailable, four-finger pan is off")
+            Log.note("TrackpadPan: MultitouchSupport unavailable, four-finger pan is off")
             return
         }
         guard let list = mt.createList()?.takeRetainedValue() else {
-            NSLog("TrackpadPan: no multitouch devices")
+            Log.note("TrackpadPan: no multitouch devices")
             return
         }
         deviceList = list
@@ -142,7 +142,7 @@ final class TrackpadPan: @unchecked Sendable {
             _ = mt.start(device, 0)
         }
         state.withLock { [heightPerWidth] in $0.heightPerWidth = heightPerWidth }
-        NSLog("TrackpadPan: following \(devices.count) multitouch device(s)")
+        Log.note("TrackpadPan: following \(devices.count) multitouch device(s)")
     }
 
     private func restartDevices() {
@@ -222,7 +222,7 @@ final class TrackpadPan: @unchecked Sendable {
                                            options: .defaultTap,
                                            eventsOfInterest: CGEventMask(1) << TrackpadPan.dockControl,
                                            callback: TrackpadPan.callback, userInfo: info) else {
-            NSLog("TrackpadPan: tapCreate failed — Accessibility granted? Retrying in 3 s")
+            Log.note("TrackpadPan: tapCreate failed — Accessibility granted? Retrying in 3 s")
             let retry = Timer(timeInterval: 3, repeats: false) { [weak self] _ in self?.installTap() }
             RunLoop.current.add(retry, forMode: .common)
             return
@@ -231,13 +231,13 @@ final class TrackpadPan: @unchecked Sendable {
         let source = CFMachPortCreateRunLoopSource(nil, port, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
-        NSLog("TrackpadPan: Dock-control tap installed")
+        Log.note("TrackpadPan: Dock-control tap installed")
     }
 
     private func checkTap() {
         guard let port else { return }
         if !CFMachPortIsValid(port) {
-            NSLog("TrackpadPan: port invalidated, reinstalling")
+            Log.note("TrackpadPan: port invalidated, reinstalling")
             self.port = nil
             installTap()
         } else if !CGEvent.tapIsEnabled(tap: port) {

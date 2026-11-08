@@ -125,7 +125,7 @@ final class AgentBar: NSPanel, NSTextFieldDelegate {
         pendingConfirmation = nil
         model.confirmation = nil
         layoutForContent()
-        NSLog("Tell Sunlight: a step was \(allowed ? "allowed" : "declined")")
+        Log.note("Tell Sunlight: a step was \(allowed ? "allowed" : "declined")")
         pending.resume(returning: allowed)
     }
 

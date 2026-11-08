@@ -40,7 +40,7 @@ final class AgentRun {
         guard case .working = state else { return }
         task?.cancel()
         state = .stopped
-        NSLog("Tell Sunlight: stopped")
+        Log.note("Tell Sunlight: stopped")
     }
 
     var isWorking: Bool { if case .working = state { return true } else { return false } }
@@ -50,13 +50,13 @@ final class AgentRun {
         // The canvas comes with the request: the first turn can act instead of asking for the list.
         var messages: [[String: Any]] = [["role": "user", "content": AgentRun.opening(request, canvas: tools.canvasNow())]]
         var calls = 0, turns = 0, inputTokens = 0, outputTokens = 0
-        NSLog("Tell Sunlight: request of \(request.count) characters, effort \(ClaudeClient.effort), fallbacks \(ClaudeClient.fallbacks ? "on" : "off")")
-        defer { NSLog("Tell Sunlight: \(turns) turns, \(calls) tool calls, \(inputTokens) input and \(outputTokens) output tokens, \(Int(Date().timeIntervalSince(started))) s") }
+        Log.note("Tell Sunlight: request of \(request.count) characters, effort \(ClaudeClient.effort), fallbacks \(ClaudeClient.fallbacks ? "on" : "off")")
+        defer { Log.note("Tell Sunlight: \(turns) turns, \(calls) tool calls, \(inputTokens) input and \(outputTokens) output tokens, \(Int(Date().timeIntervalSince(started))) s") }
         // Windows moved since the camera last framed them: Sunlight frames them at the end.
         var touched: [CGWindowID] = []
 
         while true {
-            if AgentRun.compact(&messages) { NSLog("Tell Sunlight: older reads cut to keep the request small") }
+            if AgentRun.compact(&messages) { Log.note("Tell Sunlight: older reads cut to keep the request small") }
             let reply: ClaudeClient.Reply
             let asked = Date()
             do {
@@ -72,7 +72,7 @@ final class AgentRun {
             turns += 1
             inputTokens += reply.inputTokens + reply.cachedTokens
             outputTokens += reply.outputTokens
-            NSLog("Tell Sunlight: turn \(turns) took \(String(format: "%.1f", Date().timeIntervalSince(asked))) s, \(reply.inputTokens) new and \(reply.cachedTokens) cached input tokens, \(reply.outputTokens) output, blocks \(reply.content.compactMap { $0["type"] as? String }.joined(separator: " ")), tools \(reply.toolUses.map(\.name).joined(separator: " "))")
+            Log.note("Tell Sunlight: turn \(turns) took \(String(format: "%.1f", Date().timeIntervalSince(asked))) s, \(reply.inputTokens) new and \(reply.cachedTokens) cached input tokens, \(reply.outputTokens) output, blocks \(reply.content.compactMap { $0["type"] as? String }.joined(separator: " ")), tools \(reply.toolUses.map(\.name).joined(separator: " "))")
             messages.append(["role": "assistant", "content": reply.content])
 
             let uses = reply.toolUses
@@ -103,7 +103,7 @@ final class AgentRun {
                     await tools.run(use.name, use.input)
                 }
                 guard !Task.isCancelled, isWorking else { return }
-                NSLog("Tell Sunlight: \(use.name) (\(String(format: "%.1f", Date().timeIntervalSince(ran))) s) → \(outcome.isError ? "error: " + String(outcome.result.prefix(200)) : "ok")")
+                Log.note("Tell Sunlight: \(use.name) (\(String(format: "%.1f", Date().timeIntervalSince(ran))) s) → \(outcome.isError ? "error: " + String(outcome.result.prefix(200)) : "ok")")
                 if let step = outcome.step { onStep?(step) }
                 failed = failed || outcome.isError
                 if !outcome.isError { AgentRun.track(use.name, use.input, outcome.result, in: &touched) }
@@ -180,7 +180,7 @@ final class AgentRun {
     private func frame(_ touched: [CGWindowID]) async {
         guard !touched.isEmpty else { return }
         let outcome = await tools.run("look_at", ["window_ids": touched.map { Int($0) }])
-        NSLog("Tell Sunlight: framed \(touched.count) windows → \(outcome.isError ? "error" : "ok")")
+        Log.note("Tell Sunlight: framed \(touched.count) windows → \(outcome.isError ? "error" : "ok")")
     }
 
     /// What the bar says while a tool runs.

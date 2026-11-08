@@ -86,7 +86,7 @@ final class BackgroundModel: ObservableObject {
             useImage(name)
             loadTiles()
         } catch {
-            NSLog("Background: couldn't copy \(url.lastPathComponent) in: \(error.localizedDescription)")
+            Log.note("Background: couldn't copy \(url.lastPathComponent) in: \(error.localizedDescription)")
         }
     }
 

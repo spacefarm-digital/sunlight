@@ -183,7 +183,7 @@ final class RecoveryCard: NSView {
         script.executeAndReturnError(&error)
         guard let error else { return nil }
         let message = error[NSAppleScript.errorMessage] as? String ?? "error \(error[NSAppleScript.errorNumber] ?? "?")"
-        NSLog("Setup: couldn't \(verb) through System Events — \(message)")
+        Log.note("Setup: couldn't \(verb) through System Events — \(message)")
         return message
     }
 }

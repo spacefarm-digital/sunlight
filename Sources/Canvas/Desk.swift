@@ -39,7 +39,7 @@ final class Desk {
         let displays = Desk.displays
         precondition(!displays.isEmpty, "no display")
         for (i, d) in displays.enumerated() { add(d, lead: i == 0) }
-        NSLog("Displays: \(displays.map { "\($0.name) \(Int($0.frame.width))×\(Int($0.frame.height)) at \(Int($0.frame.minX)),\(Int($0.frame.minY))" }.joined(separator: "; "))")
+        Log.note("Displays: \(displays.map { "\($0.name) \(Int($0.frame.width))×\(Int($0.frame.height)) at \(Int($0.frame.minX)),\(Int($0.frame.minY))" }.joined(separator: "; "))")
 
         WindowServerEvents.onWindowCreated = { [weak self] id in self?.canvases.forEach { $0.windowServerCreated(id) } }
         WindowServerEvents.onWindowRemoved = { [weak self] _ in self?.canvases.forEach { $0.windowServerRemoved() } }
@@ -94,6 +94,8 @@ final class Desk {
     var onHowToUse: (() -> Void)? { didSet { canvases.forEach { $0.onHowToUse = onHowToUse } } }
     /// A display came or went (after `reviewDisplays`).
     var onDisplaysChanged: (() -> Void)?
+    /// The lead canvas is on live windows again, after a launch or a Dock restart: the add-on answers.
+    var onLiveWindowsAnswering: (() -> Void)?
     /// Customise… on any canvas's background menu.
     var onCustomiseBackground: (() -> Void)? { didSet { canvases.forEach { $0.background.onCustomise = onCustomiseBackground } } }
     var onFirstSync: (() -> Void)? {
@@ -156,7 +158,7 @@ final class Desk {
     /// The window was moved to another display for real: it goes to that display's canvas, which lists
     /// it now unless the move is still to be made (`listing` false).
     func move(_ id: CGWindowID, from: CanvasController, to: CanvasController, listing: Bool = true) {
-        NSLog("Displays: window \(id) moved from \(from.display.name) to \(to.display.name)")
+        Log.note("Displays: window \(id) moved from \(from.display.name) to \(to.display.name)")
         owner[id] = to.display.uuid
         from.letGo(of: id)
         if listing { to.scheduleDiff() }
@@ -272,6 +274,7 @@ final class Desk {
         for c in canvases.dropFirst() where (c.renderer == .realWindows) != live {
             c.configureRenderer(Settings.renderer)
         }
+        if lead.renderer == .realWindows { onLiveWindowsAnswering?() }
     }
 
     func releaseLiveWindowsForDockRestart() { canvases.forEach { $0.releaseLiveWindowsForDockRestart() } }
@@ -316,7 +319,7 @@ final class Desk {
         let switching = canvases.first(where: \.isSwitching)
         switch command {
         case .missionControl where switching == nil:
-            NSLog("Key: \(command)")
+            Log.note("Key: \(command)")
             missionControlHold?.cancel()
             if NSApp.isActive {
                 // Pressed again on the canvas, a tap goes back into the last window, on whichever display; it
@@ -338,7 +341,7 @@ final class Desk {
             missionControlHold = nil
             guard let press = missionControlPress else { return }
             missionControlPress = nil
-            NSLog("Key: Mission Control key let go after \(String(format: "%.2f", held)) s")
+            Log.note("Key: Mission Control key let go after \(String(format: "%.2f", held)) s")
             guard switching == nil else { return }
             switch MissionControlHold.release(held: held, press: press) {
             case .toggle: toggle()
@@ -362,6 +365,14 @@ final class Desk {
     /// current one; that canvas hands it to the one its window is on (`absorbForeign`).
     func foreignActivation(_ app: NSRunningApplication) {
         (canvases.first { $0.isExpecting(app) } ?? current).foreignActivation(app)
+    }
+
+    /// The Dock icon of the app already in front clicked (`ForegroundWatcher.onDockClickOnFrontApp`):
+    /// to the canvas with its windows, unless one of them is in use from a canvas already.
+    func dockClickOnFrontApp(_ app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        guard !canvases.contains(where: { $0.isFollowing(pid) }) else { return }
+        (canvases.first { $0.hasWindows(of: pid) } ?? current).dockClickOnFrontApp(app)
     }
 
     func appGone(pid: pid_t) { canvases.forEach { $0.appGone(pid: pid) } }
@@ -415,7 +426,7 @@ final class Desk {
         if primaryChanged {
             // Another display is the main one now (the lid closed on an external display, say): global
             // coordinates moved under every window, so each is listed afresh where it is.
-            NSLog("Displays: \(primary.name) is the main display now; every canvas starts over")
+            Log.note("Displays: \(primary.name) is the main display now; every canvas starts over")
             owner.removeAll()
             for c in canvases {
                 c.suspendForDisplayChange()
@@ -426,7 +437,7 @@ final class Desk {
             if let c = canvases.first(where: { $0 !== lead && $0.display.uuid == d.uuid }) {
                 c.adopt(d)
             } else {
-                NSLog("Displays: \(d.name) connected; a canvas for it")
+                Log.note("Displays: \(d.name) connected; a canvas for it")
                 add(d, lead: false)
                 guard let c = canvases.last else { continue }
                 if lead.paused { c.setPaused(true) } else { c.window.orderFrontRegardless() }

@@ -172,6 +172,16 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// Asks the Mac again while the window is closed, so the menu bar's rays and its Set Up item follow,
+    /// e.g. once the canvas has reloaded the add-on by itself after launch (public issue #10). While
+    /// the window is up, its own timer checks every second.
+    func recheck() {
+        guard !isShowing else { return }
+        // A check already under way may have asked before the add-on answered: ask once more after it.
+        if checking { recheckAfterCheck = true } else { check() }
+    }
+    private var recheckAfterCheck = false
+
     /// Settings › How to use › Basics › Play the Tutorial: the basics page from its first step, whatever else is left
     /// to set up; finishing it closes the window.
     func showBasics() {
@@ -237,7 +247,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
             RunLoop.main.add(t, forMode: .common)
             tourTimer = t
         }
-        NSLog("Setup: opened, window \(window.windowNumber)")
+        Log.note("Setup: opened, window \(window.windowNumber)")
     }
 
     private func bringForward() {
@@ -270,7 +280,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
             configuration.activates = true
             configuration.addsToRecentItems = false
             NSWorkspace.shared.openApplication(at: bundle, configuration: configuration) { _, error in
-                if let error { NSLog("Setup: couldn't bring Sunlight forward: \(error.localizedDescription)") }
+                if let error { Log.note("Setup: couldn't bring Sunlight forward: \(error.localizedDescription)") }
             }
         }
     }
@@ -279,6 +289,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
     override func close() {
         guard let window, isShowing else { return }
         isShowing = false
+        PermissionDragPanel.shared.hide()
         stopWatching()
         dockIcon(false)
         music.fadeOut()
@@ -293,6 +304,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard isShowing else { return }
         isShowing = false
+        PermissionDragPanel.shared.hide()
         stopWatching()
         dockIcon(false)
         music.fadeOut(duration: 0.2)
@@ -376,6 +388,10 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
                     self.checking = false
                     self.apply(status)
                     then?(status)
+                    if self.recheckAfterCheck {
+                        self.recheckAfterCheck = false
+                        self.recheck()
+                    }
                 }
             }
         }
@@ -536,11 +552,11 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
 
         case .accessibility:
             return SetupPageSpec(page: page, eyebrow: "Accessibility", headline: "Let Sunlight move your windows.",
-                                 paragraphs: ["Accessibility is how Sunlight moves, raises and focuses other apps’ windows. Turn Sunlight on in the list that opens."],
+                                 paragraphs: ["Accessibility is how Sunlight moves, raises and focuses other apps’ windows. Turn Sunlight on in the list that opens. Not there? Drag Sunlight in from the card beside the window."],
                                  primary: action("primary", "Allow Accessibility…") { [weak self] in
                                      self?.stepAside()
                                      Permissions.requestAccessibility()
-                                     self?.openPrivacyPane("Privacy_Accessibility")
+                                     self?.openPrivacyPane("Privacy_Accessibility", dragging: .accessibility)
                                  },
                                  watching: true)
 
@@ -561,7 +577,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
                                      self?.askedForScreenRecording = true
                                      self?.stepAside()
                                      CGRequestScreenCaptureAccess()
-                                     self?.openPrivacyPane("Privacy_ScreenCapture")
+                                     self?.openPrivacyPane("Privacy_ScreenCapture", dragging: .screenRecording)
                                  },
                                  secondary: secondary,
                                  note: relaunching ? "Relaunching…" : nil, watching: !relaunching)
@@ -792,10 +808,14 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
         check()
     }
 
-    private func openPrivacyPane(_ anchor: String) {
+    /// The Privacy list for a step, with Sunlight’s icon standing beside System Settings to drag
+    /// into it when macOS didn't put Sunlight there by itself (`PermissionDragPanel`).
+    private func openPrivacyPane(_ anchor: String, dragging permission: PermissionDragPanel.Permission) {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
             NSWorkspace.shared.open(url)
         }
+        guard !review, !isTour else { return }
+        PermissionDragPanel.shared.show(for: permission)
     }
 
     /// Opens a new copy once this one has quit (Screen Recording applies to a fresh launch), with the
@@ -806,7 +826,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
         SetupRecord.setResume(page)
         if let status { refresh(status) }
         guard AppRelaunch.open(Bundle.main.bundleURL, afterQuitOf: ProcessInfo.processInfo.processIdentifier) else {
-            NSLog("Setup: couldn't relaunch")
+            Log.note("Setup: couldn't relaunch")
             relaunching = false
             return
         }
@@ -953,6 +973,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
 
     /// Back from stepping aside, the window faded in again: Sunlight came back to the front.
     private func returned() {
+        PermissionDragPanel.shared.hide()
         hideWork?.cancel()
         hideWork = nil
         steppedAside = false
@@ -973,6 +994,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
 
     /// Back from stepping aside by itself, a step having finished: the window in again, then the app.
     private func comeBack() {
+        PermissionDragPanel.shared.hide()
         guard let window else { return }
         steppedAside = false
         backdrop.isPaused = false

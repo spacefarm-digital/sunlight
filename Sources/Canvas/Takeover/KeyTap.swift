@@ -176,7 +176,7 @@ final class KeyTap: @unchecked Sendable {
         guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
                                            options: .defaultTap, eventsOfInterest: mask,
                                            callback: KeyTap.callback, userInfo: info) else {
-            NSLog("KeyTap: tapCreate failed — Accessibility granted? Retrying in 3 s")
+            Log.note("KeyTap: tapCreate failed — Accessibility granted? Retrying in 3 s")
             let retry = Timer(timeInterval: 3, repeats: false) { [weak self] _ in self?.installTap() }
             RunLoop.current.add(retry, forMode: .common)
             return
@@ -185,13 +185,13 @@ final class KeyTap: @unchecked Sendable {
         let source = CFMachPortCreateRunLoopSource(nil, port, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: isEnabled)
-        NSLog("KeyTap: installed\(isEnabled ? "" : " (stopped)")")
+        Log.note("KeyTap: installed\(isEnabled ? "" : " (stopped)")")
     }
 
     private func checkTap() {
         guard let port else { return }
         if !CFMachPortIsValid(port) {
-            NSLog("KeyTap: port invalidated, reinstalling")
+            Log.note("KeyTap: port invalidated, reinstalling")
             self.port = nil
             installTap()
         } else if CGEvent.tapIsEnabled(tap: port) != isEnabled {

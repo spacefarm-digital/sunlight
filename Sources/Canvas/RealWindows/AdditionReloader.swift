@@ -114,10 +114,10 @@ final class AdditionReloader {
         dockPID = pid
         // Between the old Dock exiting and launchd starting the new one there's no Dock at all.
         guard pid != 0 else { return }
-        NSLog("Rendering: the Dock restarted (\(old) → \(pid))")
+        Log.note("Rendering: the Dock restarted (\(old) → \(pid))")
         if crashGuard.dockRestarted(at: Date()), !AdditionReloader.pausedAfterDockCrashes {
             UserDefaults.standard.set(LiveWindowsWire.additionVersion, forKey: AdditionReloader.pausedKey)
-            NSLog("Rendering: the Dock restarted \(DockCrashGuard.limit) times in a row within \(Int(DockCrashGuard.window)) s of loading the add-on; not loading it by itself again (Reload Live Windows… tries again)")
+            Log.note("Rendering: the Dock restarted \(DockCrashGuard.limit) times in a row within \(Int(DockCrashGuard.window)) s of loading the add-on; not loading it by itself again (Reload Live Windows… tries again)")
             onPaused?()
         }
         onDockRestarted?()

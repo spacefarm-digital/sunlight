@@ -147,7 +147,8 @@ every window back at 1:1 where it was.
 
 ## Privacy
 
-No analytics, no crash reporting, no accounts. The only thing Sunlight sends over the network is the update
+No analytics, no crash reporting, no accounts. Sunlight's log and crash reports stay on your Mac
+(~/Library/Logs/Sunlight); Diagnose sums them up without window titles, for you to paste where you choose. The only thing Sunlight sends over the network is the update
 check (Sparkle fetching the release feed, `packaging/release.conf`). Window pictures, titles and layouts stay
 on your Mac.
 

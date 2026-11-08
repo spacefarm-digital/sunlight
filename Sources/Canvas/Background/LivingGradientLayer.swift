@@ -70,7 +70,7 @@ final class LivingGradientLayer: CAMetalLayer {
             state = try device.makeRenderPipelineState(descriptor: descriptor)
             commandQueue = device.makeCommandQueue()
         } catch {
-            NSLog("Background: living gradient shader failed to compile: \(error)")
+            Log.note("Background: living gradient shader failed to compile: \(error)")
         }
     }
 
