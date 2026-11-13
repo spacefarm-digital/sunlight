@@ -63,4 +63,27 @@ enum WindowSync {
         if isWidget || owner == .user { return .move }
         return .size
     }
+
+    /// Where a window's frame as its app has it is read from, to measure a new window of the app against
+    /// it (a sheet, a prompt, a popup that hangs from it).
+    enum AppFrameSource: Equatable {
+        /// The listing: the window is listed at its own size.
+        case listed
+        /// The frame the canvas keeps for it, which a listing through the transforms never changes.
+        case kept
+        /// Its app, through Accessibility: a round trip, on the main thread.
+        case accessibility
+    }
+
+    /// - `listed`: the frame in the listing, which is through the window's transform while it's drawn scaled.
+    /// - `kept`: the frame the canvas keeps (`WindowProxy.lastRealFrame`).
+    /// - `worldSize`: the window's size on the canvas, in world units: points at 1:1.
+    /// - `usedWhereDrawn`: its app is in use where its windows are drawn, at any zoom: the app is in front,
+    ///   answers at once, and may have moved the window itself since the canvas last placed it.
+    static func appFrameSource(listed: CGRect, kept: CGRect, worldSize: CGSize, usedWhereDrawn: Bool) -> AppFrameSource {
+        guard listed.width < worldSize.width - 2 else { return .listed }
+        if usedWhereDrawn { return .accessibility }
+        // Kept at the window's own size: the frame the app has, as the canvas placed or read it last.
+        return abs(kept.width - worldSize.width) <= 2 ? .kept : .accessibility
+    }
 }

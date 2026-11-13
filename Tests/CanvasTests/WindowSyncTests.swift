@@ -58,4 +58,32 @@ final class WindowSyncTests: XCTestCase {
         XCTAssertEqual(verdict(owner: .user, capturing: true, listed: moved), .move)
         XCTAssertEqual(verdict(isWidget: true, capturing: true, listed: moved), .move)
     }
+
+    // MARK: The frame a new window is measured against
+
+    private let world = CGSize(width: 400, height: 300)
+    /// `last`, as the window server lists it through a canvas zoomed out to 40%.
+    private let drawn = CGRect(x: 700, y: 420, width: 160, height: 120)
+
+    func testAWindowListedAtItsOwnSizeIsMeasuredAsListed() {
+        XCTAssertEqual(WindowSync.appFrameSource(listed: last, kept: last, worldSize: world, usedWhereDrawn: false), .listed)
+        XCTAssertEqual(WindowSync.appFrameSource(listed: last, kept: last, worldSize: world, usedWhereDrawn: true), .listed)
+        XCTAssertEqual(WindowSync.appFrameSource(listed: last.insetBy(dx: 0.5, dy: 0.5), kept: last, worldSize: world, usedWhereDrawn: false),
+                       .listed, "a rounding step is no scale")
+    }
+
+    func testOnAZoomedOutCanvasTheKeptFrameAnswersWithoutAskingTheApp() {
+        // The main thread waited on a just-launched app's answer here, for every window of the app.
+        XCTAssertEqual(WindowSync.appFrameSource(listed: drawn, kept: last, worldSize: world, usedWhereDrawn: false), .kept)
+    }
+
+    func testAnAppUsedWhereItsDrawnIsAsked() {
+        XCTAssertEqual(WindowSync.appFrameSource(listed: drawn, kept: last, worldSize: world, usedWhereDrawn: true), .accessibility,
+                       "public issue #11: Chrome's omnibar list hangs from the frame Chrome has")
+    }
+
+    func testAKeptFrameThatIsNotTheWindowsOwnSizeIsNotTrusted() {
+        XCTAssertEqual(WindowSync.appFrameSource(listed: drawn, kept: drawn, worldSize: world, usedWhereDrawn: false), .accessibility)
+        XCTAssertEqual(WindowSync.appFrameSource(listed: drawn, kept: resized, worldSize: world, usedWhereDrawn: false), .accessibility)
+    }
 }

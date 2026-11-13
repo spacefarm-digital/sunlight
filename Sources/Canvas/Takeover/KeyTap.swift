@@ -26,8 +26,27 @@ final class KeyTap: @unchecked Sendable {
         case newWindow
         /// ⌘? from anywhere: Settings › How to use.
         case howToUse
-        /// ⌃⌘F in a window: Sunlight's full screen (filling its area, then entered there), not a Space of its own.
+        /// ⌃⌘F in a window, or a click on its green button: Sunlight's full screen (filling its area, then
+        /// entered there), not a Space of its own.
         case fillAndEnter
+    }
+
+    /// The entered window's green button, where a click is Sunlight's full screen instead of macOS's.
+    struct GreenButton: Sendable, Equatable {
+        let window: CGWindowID
+        /// The button's centre, from the window's top-left corner, in points.
+        let centre: CGPoint
+        let diameter: CGFloat
+        /// Where the window was last seen (`update(greenButtonWindowAt:)`): a click nowhere near the button
+        /// there passes without the window server being asked anything.
+        var windowFrame: CGRect
+
+        /// Whether a press at `point` (global, top-left origin) is on the button, the window at `bounds`.
+        /// A little slack around the circle, as the button's own frame has; `slack` more for a guess.
+        func contains(_ point: CGPoint, windowAt bounds: CGRect, slack: CGFloat = 0) -> Bool {
+            let c = CGPoint(x: bounds.minX + centre.x, y: bounds.minY + centre.y)
+            return hypot(point.x - c.x, point.y - c.y) <= diameter / 2 + 1 + slack
+        }
     }
 
     struct State: Sendable {
@@ -45,6 +64,13 @@ final class KeyTap: @unchecked Sendable {
         var placesNewWindow = false
         /// A full-screen app's Space is in front: ⌃← goes back to the canvas's Desktop, as on the Mac.
         var inFullScreenSpace = false
+        /// Some app is in macOS's own full screen, on a Space of its own: ⌃← and ⌃→ go between the canvas's
+        /// Desktop and those Spaces, as on the Mac (there's no other Desktop to go to).
+        var hasFullScreenSpaces = false
+        /// The entered window's green button (`update(greenButton:)`): nil when there's none to take.
+        var greenButton: GreenButton?
+        /// A press on the green button was taken: its release is taken too.
+        var swallowedPress = false
         /// When the Mission Control key went down (the event's timestamp, ns), until it's let go.
         var missionControlDownAt: UInt64?
         /// Key codes whose keyDown we swallowed; their keyUp is swallowed too so apps never see an orphan.
@@ -142,8 +168,51 @@ final class KeyTap: @unchecked Sendable {
     func update(entered: Bool) {
         state.withLock {
             $0.entered = entered
-            if !entered { $0.placesNewWindow = false }
+            if !entered {
+                $0.placesNewWindow = false
+                $0.greenButton = nil
+                $0.swallowedPress = false
+            }
         }
+    }
+
+    /// The entered window's green button, read from its app once it's entered. Nil: clicks on it are the app's.
+    func update(greenButton: GreenButton?) {
+        state.withLock { $0.greenButton = $0.entered ? greenButton : nil }
+    }
+
+    /// The entered window moved (dragged by its title bar): its button is where it is now.
+    func update(greenButtonWindowAt frame: CGRect, window: CGWindowID) {
+        state.withLock { if $0.greenButton?.window == window { $0.greenButton?.windowFrame = frame } }
+    }
+
+    /// A left press: taken (and Sunlight's full screen sent) when it's a plain click on the entered
+    /// window's green button. ⌥-click is the Mac's zoom, and passes; so does a click inside a full-screen
+    /// app's Space (its green button leaves full screen). `windowBounds` is asked only when a click
+    /// could be one, since it's a trip to the window server.
+    static func press(at point: CGPoint, flags: CGEventFlags, state: inout State,
+                      frontWindow: (CGPoint) -> (id: CGWindowID, bounds: CGRect)?) -> Action {
+        state.swallowedPress = false   // a release that never came (the tap off meanwhile) is forgotten
+        guard let button = state.greenButton, mayBeOnGreenButton(point, flags: flags, state: state),
+              let front = frontWindow(point), front.id == button.window,   // not a menu or panel over it
+              button.contains(point, windowAt: front.bounds) else { return .pass }
+        state.swallowedPress = true
+        return .send(.fillAndEnter)
+    }
+
+    /// Whether a press could be on the green button, by where the window was last seen: asked before
+    /// the window server is, so most clicks cost nothing.
+    static func mayBeOnGreenButton(_ point: CGPoint, flags: CGEventFlags, state: State) -> Bool {
+        guard state.entered, !state.inFullScreenSpace, let button = state.greenButton,
+              flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty else { return false }
+        return button.contains(point, windowAt: button.windowFrame, slack: 4)
+    }
+
+    /// A left release: taken if its press was.
+    static func releasePress(state: inout State) -> Action {
+        guard state.swallowedPress else { return .pass }
+        state.swallowedPress = false
+        return .swallow
     }
 
     /// Whether ⌘N in the entered window is the canvas's (`Command.newWindow`).
@@ -154,6 +223,11 @@ final class KeyTap: @unchecked Sendable {
     /// Whether a full-screen app's Space is in front (`SpacesWatcher`).
     func update(inFullScreenSpace: Bool) {
         state.withLock { $0.inFullScreenSpace = inFullScreenSpace }
+    }
+
+    /// Whether any app is in a full-screen Space of its own (`SpacesWatcher`).
+    func update(hasFullScreenSpaces: Bool) {
+        state.withLock { $0.hasFullScreenSpaces = hasFullScreenSpaces }
     }
 
     // MARK: Tap thread
@@ -172,6 +246,8 @@ final class KeyTap: @unchecked Sendable {
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.keyUp.rawValue)
             | (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.leftMouseDown.rawValue)
+            | (1 << CGEventType.leftMouseUp.rawValue)
         let info = Unmanaged.passUnretained(self).toOpaque()
         guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
                                            options: .defaultTap, eventsOfInterest: mask,
@@ -243,6 +319,18 @@ final class KeyTap: @unchecked Sendable {
             action = commit ? .send(.appSwitchCommit) : .pass
             if case .send(let cmd) = action { send(cmd) }
             return Unmanaged.passUnretained(event)
+        case .leftMouseDown:
+            // Most presses aren't near the green button: only for one that may be is the window server asked.
+            let point = event.location
+            let maybe = state.withLock { s -> Bool in
+                s.swallowedPress = false
+                return KeyTap.mayBeOnGreenButton(point, flags: flags, state: s)
+            }
+            guard maybe else { return Unmanaged.passUnretained(event) }
+            let front = WindowList.front(at: point)
+            action = state.withLock { KeyTap.press(at: point, flags: flags, state: &$0, frontWindow: { _ in front }) }
+        case .leftMouseUp:
+            action = state.withLock { KeyTap.releasePress(state: &$0) }
         default:
             action = .pass
         }
@@ -334,8 +422,9 @@ final class KeyTap: @unchecked Sendable {
             return .send(.appSwitchStep(reverse: false))
         case leftArrow where state.switcherOpen && command && !control && !option:
             return .send(.appSwitchStep(reverse: true))
-        case leftArrow where state.inFullScreenSpace:
-            // From a full-screen app's Space, ⌃← is the way back to the canvas's Desktop.
+        case leftArrow where state.inFullScreenSpace || state.hasFullScreenSpaces,
+             rightArrow where state.inFullScreenSpace || state.hasFullScreenSpaces:
+            // Full-screen apps' Spaces sit beside the canvas's Desktop: ⌃← and ⌃→ go over to them and back.
             return .pass
         case leftArrow, rightArrow, upArrow, downArrow:
             // Spaces switching and Mission Control's ⌃↑ ⌃↓: one Desktop per display, the canvas's.

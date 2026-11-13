@@ -136,6 +136,9 @@ final class WindowProxy {
         case hidden
         /// In the Dock (⌘M): restoring it from the Dock brings it back.
         case minimized
+        /// In macOS's own full screen (the window's green button, View › Enter Full Screen), on a Space of
+        /// its own: leaving full screen brings it back; picking it goes over to that Space.
+        case fullScreen
     }
     /// Nil while the window is on the canvas, and while it's gone from the screen for a reason not yet
     /// known (Accessibility is asked whether it was minimized).

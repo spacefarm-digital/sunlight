@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import os
 
 /// What the rest of the system does while the canvas is not in front: app activations and exits from
 /// NSWorkspace, plus one Accessibility observer on the entered (or about-to-be-entered) app.
@@ -179,7 +180,12 @@ struct DockItem: Sendable {
 }
 
 /// One AXObserver on one app. Its run-loop source sits on the main run loop, so callbacks arrive on
-/// the main thread.
+/// the main thread. Its registrations are made and taken back on a queue of its own, never on the main
+/// thread: each is a round trip to the app, and an app that is launching, or busy (just sent behind the
+/// canvas and redrawing for See All), answers only at the messaging timeout. Made on the main thread,
+/// the six registrations for a window entered in an app that had just launched held the canvas for one
+/// to two seconds (the retries of the ones that timed out each waited again), and the removals were up
+/// to a second at every return to the canvas.
 final class AXAppObserver {
     typealias Handler = @MainActor (String, AXUIElement) -> Void
 
@@ -188,6 +194,12 @@ final class AXAppObserver {
     private let app: AXUIElement
     private var window: AXUIElement?
     private let handler: Handler
+    /// Where the registrations are made and taken back, in the order they were asked for: a window
+    /// left and entered again has its registration taken back before it's made again. One queue per
+    /// observer, so an app that doesn't answer holds up nobody else's. Nothing waits on it.
+    private let registrations: DispatchQueue
+    /// Set as the observer is let go: registrations still waiting their turn aren't made.
+    private let ended = OSAllocatedUnfairLock(initialState: false)
 
     private static let appNotifications = [
         kAXFocusedWindowChangedNotification,
@@ -207,40 +219,34 @@ final class AXAppObserver {
         self.observer = created
         self.app = AXWindow.application(pid)
         self.handler = handler
+        self.registrations = DispatchQueue(label: "canvas.ax.observer.\(pid)", qos: .userInitiated)
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         for name in AXAppObserver.appNotifications { add(name, to: app) }
     }
 
     func watch(window element: AXUIElement?) {
-        if let old = window, old != element {
+        let old = window
+        window = element
+        // The new window first: it's the one in use. The old one's registration is taken back after it,
+        // and before any later one for the same window (entered again), which is all the order needed.
+        if let element { add(kAXUIElementDestroyedNotification, to: element) }
+        if let old, old != element {
             let observer = observer
-            AXAppObserver.teardown.async { [weak self] in
+            registrations.async {
                 AXObserverRemoveNotification(observer, old, kAXUIElementDestroyedNotification as CFString)
-                DispatchQueue.main.async {
-                    // Watched again meanwhile (into one window, another, and back): the removal just
-                    // undid its registration, so it's made again.
-                    guard let self, self.window == old else { return }
-                    self.add(kAXUIElementDestroyedNotification, to: old)
-                }
             }
         }
-        window = element
-        if let element { add(kAXUIElementDestroyedNotification, to: element) }
     }
-
-    /// Where registrations are taken back. Each removal is a round trip to the app, which is usually
-    /// busy just then (it has been sent behind the canvas and is redrawing for See All) and answers
-    /// only at the messaging timeout: on the main thread that was up to a second at every return to
-    /// the canvas, more with more windows on show. Nothing waits for the answer.
-    private static let teardown = DispatchQueue(label: "canvas.ax.teardown", qos: .utility)
 
     deinit {
         // The run-loop source goes first, here: no callback can arrive after this, so the unretained
-        // refcon never outlives the observer. The registrations go on the teardown queue, which keeps
-        // the observer and the elements alive until it's done.
+        // refcon never outlives the observer. The registrations go on the queue, behind any still to be
+        // made (which are skipped), and the queue keeps the observer and the elements alive until it's
+        // done.
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        ended.withLock { $0 = true }
         let observer = observer, app = app, window = window
-        AXAppObserver.teardown.async {
+        registrations.async {
             for name in AXAppObserver.appNotifications {
                 AXObserverRemoveNotification(observer, app, name as CFString)
             }
@@ -250,29 +256,64 @@ final class AXAppObserver {
         }
     }
 
-    /// A launching app, or an Electron/Chromium app enabling accessibility lazily, answers
-    /// `cannotComplete` for a while; keep trying for a few seconds.
+    /// What the app's answer to a registration means.
+    enum Outcome: Equatable {
+        case registered
+        /// A launching app, or an Electron/Chromium app enabling accessibility lazily, answers
+        /// `cannotComplete` for a while: asked again in a quarter of a second, for a few seconds.
+        case retry
+        /// The window being entered is already gone as far as its app is concerned (Music's closed
+        /// window, which the window server still listed and ⌘Tab still went to): told as its
+        /// destruction, so the canvas asks the app and comes back.
+        case windowGone
+        case failed
+    }
+
+    static let retries = 20
+
+    /// - `attempt`: how many times it has been asked before.
+    /// - `forWindow`: the entered window's destruction, rather than one of the app's own notifications.
+    static func outcome(of error: AXError, attempt: Int, forWindow: Bool) -> Outcome {
+        switch error {
+        case .success, .notificationAlreadyRegistered: return .registered
+        case .cannotComplete where attempt < retries: return .retry
+        case .invalidUIElement where forWindow: return .windowGone
+        default: return .failed
+        }
+    }
+
+    /// Asks for `name` from `element`, on the observer's queue; the answer comes back to `added` on the
+    /// main thread. Called on the main thread.
     private func add(_ name: String, to element: AXUIElement, attempt: Int = 0) {
+        let observer = observer, ended = ended
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        let err = AXObserverAddNotification(observer, element, name as CFString, refcon)
-        switch err {
-        case .success, .notificationAlreadyRegistered:
+        registrations.async { [weak self] in
+            guard !ended.withLock({ $0 }) else { return }
+            let error = AXObserverAddNotification(observer, element, name as CFString, refcon)
+            // `self` is only ever looked at on the main thread, where it's let go.
+            DispatchQueue.main.async { self?.added(name, to: element, attempt: attempt, error: error) }
+        }
+    }
+
+    /// The app's answer to a registration, on the main thread.
+    private func added(_ name: String, to element: AXUIElement, attempt: Int, error: AXError) {
+        let forWindow = name == kAXUIElementDestroyedNotification
+        // Another window is watched by now (or none): this one's registration has been taken back or is
+        // about to be, and its answer is nothing to act on.
+        if forWindow, window != element { return }
+        switch AXAppObserver.outcome(of: error, attempt: attempt, forWindow: forWindow) {
+        case .registered:
             if attempt > 0 { Log.note("AXObserver: \(name) for pid \(pid) registered after \(attempt) retries") }
-        case .cannotComplete where attempt < 20:
+        case .retry:
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                self?.add(name, to: element, attempt: attempt + 1)
+                guard let self, !forWindow || self.window == element else { return }
+                self.add(name, to: element, attempt: attempt + 1)
             }
-        case .invalidUIElement where name == kAXUIElementDestroyedNotification:
-            // The window being entered is already gone as far as its app is concerned (Music's closed
-            // window, which the window server still listed and ⌘Tab still went to): told as its
-            // destruction, a moment from now, so the canvas asks the app and comes back.
+        case .windowGone:
             Log.note("AXObserver: the window entered in pid \(pid) is already gone for its app")
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.window == element else { return }
-                MainActor.assumeIsolated { self.handler(name, element) }
-            }
-        default:
-            Log.note("AXObserver: \(name) for pid \(pid) failed (\(err.rawValue))")
+            MainActor.assumeIsolated { handler(name, element) }
+        case .failed:
+            Log.note("AXObserver: \(name) for pid \(pid) failed (\(error.rawValue))")
         }
     }
 

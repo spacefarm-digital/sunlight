@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5
+
+- A window put in macOS's own full screen (the green button's menu, View > Enter Full Screen, or the app itself) is no longer forgotten: it stays on the canvas as away, dashed in the minimap and listed in ⌘Tab, and picking it takes you to its full-screen Space. When it leaves full screen it comes back to its place and you're in it. ⌃← and ⌃→ go between the canvas and full-screen apps, as on the Mac.
+- Clicking the green button of the window you're in fills the screen with it on the canvas, as ⌃⌘F does, instead of sending it off to a Space of its own; ⌥-click still zooms. A window that goes into macOS's full screen anyway is brought back onto the canvas and filled, unless you put it back in full screen right away, which leaves it there.
+- Going into a window of an app that has just opened (Messages, Mail) no longer freezes the canvas for up to two seconds, and a new window opening while you're zoomed out no longer holds it for half a second.
+
 ## 0.2.4
 
 - Clicking the Dock icon of the app already in front (after clicking into one of its windows at a zoom, or with Focus follows the pointer) takes the camera to its window.

@@ -132,6 +132,21 @@ struct AXWindow: @unchecked Sendable {
         }
     }
 
+    /// Whether the window's green button can be pressed (a window that can't be resized has it greyed).
+    var zoomButtonEnabled: Bool {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXZoomButtonAttribute as CFString, &ref) == .success,
+              let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return false }
+        return (ref as! AXUIElement).bool(kAXEnabledAttribute)
+    }
+
+    /// Out of macOS's own full screen, back onto the Desktop it came from. False if the app refused.
+    func exitFullScreen() -> Bool {
+        Watchdog.during("Accessibility: leave full screen (AXWindow.exitFullScreen)") {
+            AXUIElementSetAttributeValue(element, "AXFullScreen" as CFString, kCFBooleanFalse) == .success
+        }
+    }
+
     @discardableResult
     func unminimize() -> Bool {
         AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success

@@ -37,6 +37,23 @@ enum WindowList {
         }
     }
 
+    /// The frontmost window under `point` (global, top-left origin) that isn't Sunlight's own and can be
+    /// seen: what a click there lands on, menus and panels included. One listing; for the key tap's green
+    /// button, asked only for a click already on the button's spot.
+    nonisolated static func front(at point: CGPoint) -> (id: CGWindowID, bounds: CGRect)? {
+        let me = ProcessInfo.processInfo.processIdentifier
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        for d in list {
+            guard let id = (d[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  (d[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value != me,
+                  ((d[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
+                  let b = d[kCGWindowBounds as String],
+                  let bounds = CGRect(dictionaryRepresentation: b as! CFDictionary), bounds.contains(point) else { continue }
+            return (id, bounds)
+        }
+        return nil
+    }
+
     /// One window, if it's on screen: for watching for a single window without listing them all.
     nonisolated static func onScreen(_ id: CGWindowID) -> WindowInfo? {
         guard id != 0, let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]],

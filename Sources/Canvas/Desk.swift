@@ -377,6 +377,28 @@ final class Desk {
 
     func appGone(pid: pid_t) { canvases.forEach { $0.appGone(pid: pid) } }
 
+    /// A full-screen app's Space came to the front (`SpacesWatcher.onEnteredFullScreen`): if it's a window
+    /// of the canvas's that went there, it comes back and takes Sunlight's full screen instead.
+    func enteredFullScreenSpace() {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              pid != ProcessInfo.processInfo.processIdentifier else { return }
+        AXQueue.interactive.async { [weak self] in
+            guard let ax = AXWindow.focusedWindow(pid: pid), ax.isFullScreen, let id = ax.windowID else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let canvas = self.canvases.first(where: { $0.agentHolds(id) }) else { return }
+                    canvas.pullBackFromFullScreen(ax, id: id)
+                }
+            }
+        }
+    }
+
+    /// A full-screen app's Space was in front and the canvas's Desktop is again (`SpacesWatcher.onLeftFullScreen`).
+    func leftFullScreenSpace() {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        (canvases.first { $0.hasWindows(of: app.processIdentifier) } ?? current).leftFullScreenSpace(app)
+    }
+
     private func following(_ pid: pid_t) -> CanvasController { canvases.first { $0.isFollowing(pid) } ?? lead }
 
     func focusedWindowChanged(pid: pid_t, element: AXUIElement) { following(pid).focusedWindowChanged(pid: pid, element: element) }

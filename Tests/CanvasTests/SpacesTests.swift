@@ -26,6 +26,17 @@ final class SpacesTests: XCTestCase {
         XCTAssertTrue(Spaces.inFullScreenSpace(displays))
     }
 
+    func testTheFullScreenSpacesInFrontArePerDisplay() {
+        let displays = Spaces.displays(from: raw([("A", current: 9, spaces: [(1, 0), (9, 4)]), ("B", current: 5, spaces: [(5, 0), (12, 4)])]))
+        XCTAssertEqual(Spaces.frontFullScreenSpaces(displays), [9])
+    }
+
+    func testAFullScreenAppsSpaceIsSeen() {
+        let displays = Spaces.displays(from: raw([("A", current: 1, spaces: [(1, 0), (9, 4)])]))
+        XCTAssertTrue(Spaces.hasFullScreenSpaces(displays))
+        XCTAssertFalse(Spaces.hasFullScreenSpaces(Spaces.displays(from: raw([("A", current: 1, spaces: [(1, 0)])]))))
+    }
+
     func testOneDesktopPerDisplayHasNothingToFold() {
         let displays = Spaces.displays(from: raw([("A", current: 1, spaces: [(1, 0), (9, 4)]), ("B", current: 5, spaces: [(5, 0)])]))
         XCTAssertEqual(Spaces.extraDesktops(displays), 0)
@@ -68,10 +79,12 @@ final class SpacesTests: XCTestCase {
 final class SpacesKeysTests: XCTestCase {
     private let left: Int64 = 123, right: Int64 = 124, down: Int64 = 125, up: Int64 = 126, f: Int64 = 3
 
-    private func act(_ key: Int64, _ flags: CGEventFlags, entered: Bool = false, fullScreen: Bool = false, character: String? = nil) -> KeyTap.Action {
+    private func act(_ key: Int64, _ flags: CGEventFlags, entered: Bool = false, fullScreen: Bool = false,
+                     fullScreenSpaces: Bool = false, character: String? = nil) -> KeyTap.Action {
         var state = KeyTap.State()
         state.entered = entered
         state.inFullScreenSpace = fullScreen
+        state.hasFullScreenSpaces = fullScreen || fullScreenSpaces
         return KeyTap.action(keyCode: key, flags: flags, state: &state, character: character)
     }
 
@@ -79,11 +92,18 @@ final class SpacesKeysTests: XCTestCase {
         for key in [left, right, up, down] { XCTAssertEqual(act(key, .maskControl), .swallow) }
     }
 
-    func testControlLeftPassesInAFullScreenSpace() {
+    func testControlLeftAndRightPassInAFullScreenSpace() {
         XCTAssertEqual(act(left, .maskControl, fullScreen: true), .pass, "the way back to the canvas's Desktop")
-        XCTAssertEqual(act(right, .maskControl, fullScreen: true), .swallow)
+        XCTAssertEqual(act(right, .maskControl, fullScreen: true), .pass, "on to the next full-screen app")
         XCTAssertEqual(act(up, .maskControl, fullScreen: true), .swallow)
     }
+
+    func testControlLeftAndRightReachFullScreenAppsFromTheCanvas() {
+        XCTAssertEqual(act(right, .maskControl, fullScreenSpaces: true), .pass, "over to a full-screen app's Space")
+        XCTAssertEqual(act(left, .maskControl, fullScreenSpaces: true), .pass)
+        XCTAssertEqual(act(down, .maskControl, fullScreenSpaces: true), .swallow)
+    }
+
 
     func testControlCommandFInAWindowIsSunlightsFullScreen() {
         XCTAssertEqual(act(f, [.maskControl, .maskCommand], entered: true, character: "\u{06}"), .send(.fillAndEnter))
@@ -91,5 +111,55 @@ final class SpacesKeysTests: XCTestCase {
         XCTAssertEqual(act(f, [.maskControl, .maskCommand], entered: false), .pass, "on the canvas it's the Mac's")
         XCTAssertEqual(act(f, [.maskControl, .maskCommand], entered: true, fullScreen: true), .pass, "a full-screen app leaves its way")
         XCTAssertEqual(act(f, .maskCommand, entered: true, character: "f"), .pass, "⌘F is find")
+    }
+
+    // MARK: The green button
+
+    private let window = CGRect(x: 100, y: 200, width: 800, height: 600)
+    private var button: KeyTap.GreenButton {
+        KeyTap.GreenButton(window: 7, centre: CGPoint(x: 62, y: 16), diameter: 14, windowFrame: window)
+    }
+
+    private func press(_ point: CGPoint, _ flags: CGEventFlags = [], entered: Bool = true, fullScreen: Bool = false,
+                       front: CGWindowID = 7, state: inout KeyTap.State) -> KeyTap.Action {
+        state.entered = entered
+        state.inFullScreenSpace = fullScreen
+        state.greenButton = button
+        let bounds = front == 7 ? window : CGRect(x: 120, y: 205, width: 200, height: 300)
+        return KeyTap.press(at: point, flags: flags, state: &state, frontWindow: { _ in (front, bounds) })
+    }
+
+    func testAClickOnTheGreenButtonIsSunlightsFullScreen() {
+        var state = KeyTap.State()
+        XCTAssertEqual(press(CGPoint(x: 162, y: 216), state: &state), .send(.fillAndEnter))
+        XCTAssertEqual(KeyTap.releasePress(state: &state), .swallow, "its release is taken too")
+        XCTAssertEqual(KeyTap.releasePress(state: &state), .pass)
+    }
+
+    func testOtherClicksAreTheApps() {
+        var state = KeyTap.State()
+        XCTAssertEqual(press(CGPoint(x: 139, y: 216), state: &state), .pass, "the yellow button")
+        XCTAssertEqual(press(CGPoint(x: 400, y: 400), state: &state), .pass)
+        XCTAssertEqual(press(CGPoint(x: 162, y: 216), .maskAlternate, state: &state), .pass, "⌥-click is the Mac's zoom")
+        XCTAssertEqual(press(CGPoint(x: 162, y: 216), entered: false, state: &state), .pass)
+        XCTAssertEqual(press(CGPoint(x: 162, y: 216), fullScreen: true, state: &state), .pass, "in full screen it leaves full screen")
+        XCTAssertEqual(press(CGPoint(x: 162, y: 216), front: 9, state: &state), .pass, "a menu or panel over the button")
+        XCTAssertEqual(KeyTap.releasePress(state: &state), .pass)
+    }
+
+    func testAPressForgetsAReleaseThatNeverCame() {
+        var state = KeyTap.State()
+        XCTAssertEqual(press(CGPoint(x: 162, y: 216), state: &state), .send(.fillAndEnter))
+        // The tap was off for the release; the next click is the app's, press and release.
+        XCTAssertEqual(press(CGPoint(x: 400, y: 400), state: &state), .pass)
+        XCTAssertEqual(KeyTap.releasePress(state: &state), .pass)
+    }
+
+    func testOnlyClicksNearWhereTheButtonWasAskTheWindowServer() {
+        var state = KeyTap.State()
+        state.entered = true
+        state.greenButton = button
+        XCTAssertTrue(KeyTap.mayBeOnGreenButton(CGPoint(x: 164, y: 218), flags: [], state: state))
+        XCTAssertFalse(KeyTap.mayBeOnGreenButton(CGPoint(x: 400, y: 400), flags: [], state: state))
     }
 }

@@ -60,6 +60,9 @@ final class TakeoverMode {
         watcher.onWindowMoved = { [weak canvas] pid, element in canvas?.windowMoved(pid: pid, element: element) }
         watcher.onEnteredWindowDestroyed = { [weak canvas] pid in canvas?.enteredWindowDestroyed(pid: pid) }
         spaces.onFullScreenChanged = { [keyTap] inFullScreen in keyTap.update(inFullScreenSpace: inFullScreen) }
+        spaces.onFullScreenSpaces = { [keyTap] any in keyTap.update(hasFullScreenSpaces: any) }
+        spaces.onLeftFullScreen = { [weak canvas] in canvas?.leftFullScreenSpace() }
+        spaces.onEnteredFullScreen = { [weak canvas] in canvas?.enteredFullScreenSpace() }
         spaces.onDesktopsToFold = { [weak self] in self?.desktopsToFold() }
     }
 

@@ -147,6 +147,22 @@ enum Spaces {
         displays.contains { d in d.spaces.first { $0.id == d.current }?.kind == .fullScreen }
     }
 
+    /// Whether `window` is on a full-screen app's Space: in macOS's own full screen, whatever its app says.
+    static func isInFullScreenSpace(_ window: CGWindowID, displays: [Display] = read()) -> Bool {
+        let fullScreen = Set(displays.flatMap { $0.spaces.filter { $0.kind == .fullScreen }.map(\.id) })
+        return !fullScreen.isEmpty && spaces(of: window).contains { fullScreen.contains($0) }
+    }
+
+    /// The full-screen apps' Spaces in front, one at most per display.
+    static func frontFullScreenSpaces(_ displays: [Display]) -> Set<UInt64> {
+        Set(displays.compactMap { d in d.spaces.first { $0.id == d.current && $0.kind == .fullScreen }?.id })
+    }
+
+    /// Whether any display has a full-screen app's Space.
+    static func hasFullScreenSpaces(_ displays: [Display]) -> Bool {
+        displays.contains { $0.spaces.contains { $0.kind == .fullScreen } }
+    }
+
     /// Ordinary windows of other apps, on any Space: what folding moves.
     static func appWindows() -> [(id: CGWindowID, pid: pid_t)] {
         let me = ProcessInfo.processInfo.processIdentifier
@@ -258,10 +274,21 @@ final class DockSpaces: Spaces.Mover, @unchecked Sendable {
 
 /// Watches for a Desktop appearing (Mission Control's +, a display's own Desktops coming back) and for
 /// the Space changing, while takeover is on. A short while after there are Desktops to fold,
-/// `onDesktopsToFold`; `onFullScreenChanged` says whether a full-screen app's Space is in front.
+/// `onDesktopsToFold`; `onFullScreenChanged` says whether a full-screen app's Space is in front, and
+/// `onFullScreenSpaces` whether there's one at all.
 @MainActor
 final class SpacesWatcher {
     var onFullScreenChanged: ((Bool) -> Void)?
+    var onFullScreenSpaces: ((Bool) -> Void)?
+    /// A full-screen app's Space was in front and isn't any more: the person stepped back out of it, or the
+    /// app left full screen.
+    var onLeftFullScreen: (() -> Void)?
+    /// A full-screen app's Space came to the front: a window just went into macOS's own full screen (or
+    /// the person went over to one that was).
+    var onEnteredFullScreen: (() -> Void)?
+    /// The full-screen apps' Spaces in front at the last look, across displays; nil before the first (the
+    /// first look sets it quietly: a full-screen app already in front at start isn't one that just went).
+    private var frontFullScreen: Set<UInt64>?
     var onDesktopsToFold: (() -> Void)?
 
     static let foldDelay: TimeInterval = 2
@@ -297,11 +324,22 @@ final class SpacesWatcher {
         timer = nil
         pendingFold?.cancel()
         pendingFold = nil
+        frontFullScreen = nil
     }
 
     private func check() {
         let displays = Spaces.read()
-        onFullScreenChanged?(Spaces.inFullScreenSpace(displays))
+        let inFullScreen = Spaces.inFullScreenSpace(displays)
+        onFullScreenChanged?(inFullScreen)
+        onFullScreenSpaces?(Spaces.hasFullScreenSpaces(displays))
+        let front = Spaces.frontFullScreenSpaces(displays)
+        if let before = frontFullScreen {
+            // Per Space, not per Mac: a window going full screen on one display while another display
+            // already shows a full-screen app is still news, and so is going from one to another.
+            if !before.subtracting(front).isEmpty { onLeftFullScreen?() }
+            if !front.subtracting(before).isEmpty { onEnteredFullScreen?() }
+        }
+        frontFullScreen = front
         let extra = Spaces.extraDesktops(displays)
         defer { lastExtra = extra }
         // Said once for each count, and again now and then while they stay: not every poll.
