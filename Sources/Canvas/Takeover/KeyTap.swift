@@ -62,6 +62,11 @@ final class KeyTap: @unchecked Sendable {
         /// ⌘N is the canvas's to handle (`Command.newWindow`): the entered app's ⌘N makes a window and
         /// windows push each other.
         var placesNewWindow = false
+        /// Whether F11 still means Show Desktop (`Bindings`): rebound, F11 goes back to the Mac.
+        var showDesktopOnF11 = true
+        var toggleCanvasOnMissionControl = true
+        var howToUseOnDefault = true
+        var recordingShortcut = false
         /// A full-screen app's Space is in front: ⌃← goes back to the canvas's Desktop, as on the Mac.
         var inFullScreenSpace = false
         /// Some app is in macOS's own full screen, on a Space of its own: ⌃← and ⌃→ go between the canvas's
@@ -154,7 +159,15 @@ final class KeyTap: @unchecked Sendable {
     /// Off: every key passes, at once, whether or not the tap's thread is up yet. The tap itself is
     /// told to stop listening too, so the keys don't even round-trip through this process meanwhile.
     func stop() {
-        state.withLock { $0 = State() }
+        state.withLock {
+            let desktop = $0.showDesktopOnF11
+            let toggle = $0.toggleCanvasOnMissionControl
+            let howToUse = $0.howToUseOnDefault
+            $0 = State()
+            $0.showDesktopOnF11 = desktop
+            $0.toggleCanvasOnMissionControl = toggle
+            $0.howToUseOnDefault = howToUse
+        }
         guard let runLoop else { return }
         CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) { [self] in
             if let port { CGEvent.tapEnable(tap: port, enable: false) }
@@ -218,6 +231,23 @@ final class KeyTap: @unchecked Sendable {
     /// Whether ⌘N in the entered window is the canvas's (`Command.newWindow`).
     func update(placesNewWindow: Bool) {
         state.withLock { $0.placesNewWindow = placesNewWindow && $0.entered }
+    }
+
+    /// Settings › Shortcuts: F11 is Show Desktop until it is rebound, and then it is the Mac's again.
+    func update(showDesktopOnF11: Bool) {
+        state.withLock { $0.showDesktopOnF11 = showDesktopOnF11 }
+    }
+
+    func update(toggleCanvasOnMissionControl: Bool) {
+        state.withLock { $0.toggleCanvasOnMissionControl = toggleCanvasOnMissionControl }
+    }
+
+    func update(howToUseOnDefault: Bool) {
+        state.withLock { $0.howToUseOnDefault = howToUseOnDefault }
+    }
+
+    func update(recordingShortcut: Bool) {
+        state.withLock { $0.recordingShortcut = recordingShortcut }
     }
 
     /// Whether a full-screen app's Space is in front (`SpacesWatcher`).
@@ -380,6 +410,7 @@ final class KeyTap: @unchecked Sendable {
     /// `autorepeat`: the key is held and this is the system repeating it. `timestamp`: the event's, in ns.
     static func action(keyCode: Int64, flags: CGEventFlags, state: inout State, character: String? = nil, symbol: String? = nil,
                        autorepeat: Bool = false, timestamp: UInt64 = 0) -> Action {
+        guard !state.recordingShortcut else { return .pass }
         let command = flags.contains(.maskCommand)
         let control = flags.contains(.maskControl)
         let option = flags.contains(.maskAlternate)
@@ -398,7 +429,7 @@ final class KeyTap: @unchecked Sendable {
         }
 
         // ⌘? on any layout (the key that types ?, or ⌘⇧/): How to use, from the canvas or inside a window.
-        if command, !control, !option, symbol == "?" || character == "?" || (keyCode == slash && shift) {
+        if state.howToUseOnDefault, command, !control, !option, (symbol == "?" || character == "?" || (keyCode == slash && shift)) {
             return .send(.howToUse)
         }
 
@@ -430,12 +461,13 @@ final class KeyTap: @unchecked Sendable {
             // Spaces switching and Mission Control's ⌃↑ ⌃↓: one Desktop per display, the canvas's.
             return (control && !command && !option) ? .swallow : .pass
         case missionControlKey where !command && !control && !option:
+            guard state.toggleCanvasOnMissionControl else { return .pass }
             // Held, the key repeats: it's still the one press (held to pick a window), not a toggle each time.
             if autorepeat || state.missionControlDownAt != nil { return .swallow }
             state.missionControlDownAt = timestamp
             return .send(.missionControl)
         case f11 where !command && !control && !option:
-            return .send(.showDesktop)
+            return state.showDesktopOnF11 ? .send(.showDesktop) : .pass
         default:
             return .pass
         }

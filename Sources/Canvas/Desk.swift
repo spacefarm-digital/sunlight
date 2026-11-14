@@ -91,6 +91,7 @@ final class Desk {
 
     var onSetUp: (() -> Void)? { didSet { canvases.forEach { $0.onSetUp = onSetUp } } }
     /// ⌘? anywhere while taken over: Settings › How to use.
+    var onTellSunlight: (() -> Void)?
     var onHowToUse: (() -> Void)? { didSet { canvases.forEach { $0.onHowToUse = onHowToUse } } }
     /// A display came or went (after `reviewDisplays`).
     var onDisplaysChanged: (() -> Void)?
@@ -214,19 +215,43 @@ final class Desk {
         case .ended:
             (panning ?? current).trackpadPan(phase)
             panning = nil
-        case .seeAll:
-            // By Settings › How to use, a flick up can end a drag mid-way: that canvas gets it.
-            if let panning {
-                panning.trackpadPan(phase)
-            } else {
-                // A tap is the display under the pointer's, not the one a window is entered on (public
-                // issue #6). That one leaves its window by itself as Sunlight comes forward
-                // (`returnedToCanvas`, on every canvas), and stays behind the one tapped on.
-                pointed.trackpadPan(phase)
-            }
+        case .gesture(let gesture):
+            // A flick can end a drag mid-way: that canvas gets the gesture, wherever the pan was.
+            let command = Bindings.command(for: gesture)
+            // Without a drag, See All is the display under the pointer's, not the one a window is entered
+            // on (public issue #6). That one leaves its window by itself as Sunlight comes forward
+            // (`returnedToCanvas`, on every canvas), and stays behind the one tapped on.
+            let target = panning ?? (command == .seeAll ? pointed : current)
+            panning?.cancelTrackpadPan(preserveOrigin: command == .seeAll)
             panning = nil
-        case .spread:
-            current.trackpadPan(phase)
+            guard let command else { return }
+            perform(command, on: target)
+        }
+    }
+
+    /// A command from a key, a gesture or a menu: the window, the screen, or the canvas it acts on.
+    func perform(_ command: Command, on target: CanvasController? = nil) {
+        let target = target ?? current
+        if let preset = command.preset {
+            target.tile(preset)
+            return
+        }
+        if let arrangement = command.arrangement {
+            target.arrange(columns: arrangement.columns, rows: arrangement.rows)
+            return
+        }
+        switch command {
+        case .tidy: target.tidy()
+        case .nextDisplay: target.moveToDisplay(step: 1)
+        case .previousDisplay: target.moveToDisplay(step: -1)
+        case .toggleStrip: target.toggleStripMode()
+        case .pictureInPicture: target.togglePipCommand()
+        case .tellSunlight: onTellSunlight?()
+        case .showDesktop: target.showDesktop()
+        case .seeAll: target.seeAll()
+        case .toggleCanvas: toggle()
+        case .panCanvas: break
+        default: break
         }
     }
 
