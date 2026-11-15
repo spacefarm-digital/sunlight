@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3
+
+The performance release. Measured against 0.1 on the same Mac, on battery, ten minutes of everyday use each:
+59% fewer dropped frames (1.1% → 0.45%), each frame reaches the windows 3.3× faster (8.3 → 2.5 ms), and
+Sunlight uses 29% less memory (175 → 124 MB).
+
+- **⌘Tab arrives sooner.** The flight to a window is the same move, a touch quicker and with half the bounce at
+  the end, so the app is in front about a tenth of a second earlier.
+- **Lighter at rest.** The Settings window no longer keeps drawing after it has left the screen (left open behind
+  another app it cost an eighth of a processor core), and closing it gives its memory back.
+- **Less memory for a picture background.** The picture and its blur levels are held once, in a buffer shared with
+  the window server, instead of twice; and the wider blur levels are kept smaller, which is all a blur that wide holds.
+- **No more catches when an app is slow to answer.** When an app put up a sheet or a new window, Sunlight waited
+  on the main thread for the app to say which window it was. Those questions are now asked off to the side.
+- **A pan no longer catches as a window comes into reach or drops out of it.** Crossing that line used to cost a
+  full frame for every window; now it costs nothing extra.
+- An app whose front window can't go on the canvas (an overlay, a panel) is no longer asked for its window four
+  times a second for as long as it stays in front.
+- What an app's ⌘N does is remembered for ten minutes instead of read from its whole menu bar on every entry.
+- Hitches and stalls in the log name what the main thread was doing wherever Sunlight can tell, and with
+  `PerfLog` on the log has a line per switch and a summary every five seconds, so slow spots can be found from
+  a log alone.
+- Experimental, with *Use windows at any zoom* and *Single click zooms in* on: a single click flies the window to
+  the middle and focuses it at once, without waiting to see if a second click follows; ⌘-click focuses a window
+  where it is.
+
+The add-on in the Dock is unchanged (sunlight-57): nothing to reload.
+
 ## 0.2.5
 
 - A window put in macOS's own full screen (the green button's menu, View > Enter Full Screen, or the app itself) is no longer forgotten: it stays on the canvas as away, dashed in the minimap and listed in ⌘Tab, and picking it takes you to its full-screen Space. When it leaves full screen it comes back to its place and you're in it. ⌃← and ⌃→ go between the canvas and full-screen apps, as on the Mac.

@@ -428,28 +428,32 @@ final class LiveWindowsConnection {
     /// The add-on's version (its stock `0x01` request: `OSAX_VERSION` and a newline), or nil when
     /// nothing answers it.
     static func version(path: String = socketPath) -> String? {
-        do {
-            let socket = try LiveWindowsConnection(path: path)
-            defer { socket.close() }
-            try socket.send(LiveWindowsWire.message(0x01))
-            var reply = Data()
-            while reply.count < 32 {
-                let byte = try socket.receive(1)
-                if byte[0] == UInt8(ascii: "\n") { break }
-                reply.append(byte)
-            }
-            let version = String(decoding: reply, as: UTF8.self)
-            return version.isEmpty ? nil : version
-        } catch { return nil }
+        Watchdog.during("the Dock add-on's version (LiveWindowsConnection.version)") {
+            do {
+                let socket = try LiveWindowsConnection(path: path)
+                defer { socket.close() }
+                try socket.send(LiveWindowsWire.message(0x01))
+                var reply = Data()
+                while reply.count < 32 {
+                    let byte = try socket.receive(1)
+                    if byte[0] == UInt8(ascii: "\n") { break }
+                    reply.append(byte)
+                }
+                let version = String(decoding: reply, as: UTF8.self)
+                return version.isEmpty ? nil : version
+            } catch { return nil }
+        }
     }
 
     static func probe(path: String = socketPath) -> Bool {
-        do {
-            let socket = try LiveWindowsConnection(path: path)
-            defer { socket.close() }
-            try socket.send(LiveWindowsWire.message(LiveWindowsWire.capability))
-            return try socket.receive(LiveWindowsWire.magic.count) == LiveWindowsWire.magic
-        } catch { return false }
+        Watchdog.during("whether the Dock add-on answers (LiveWindowsConnection.probe)") {
+            do {
+                let socket = try LiveWindowsConnection(path: path)
+                defer { socket.close() }
+                try socket.send(LiveWindowsWire.message(LiveWindowsWire.capability))
+                return try socket.receive(LiveWindowsWire.magic.count) == LiveWindowsWire.magic
+            } catch { return false }
+        }
     }
 
     /// A stock request on its own connection, served by yabai's ordinary listener (not the lease).

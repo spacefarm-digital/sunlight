@@ -169,6 +169,22 @@ enum SettingsPictures {
     }
 }
 
+// MARK: - Holding still
+
+/// Whether the moving pictures hold still because nobody can see them: the Settings window hidden behind
+/// another app, or covered. A loop left running redraws its window for no one. Off anywhere that
+/// doesn't say otherwise (Set Up Sunlight's tutorial).
+private struct PicturesPausedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var picturesPaused: Bool {
+        get { self[PicturesPausedKey.self] }
+        set { self[PicturesPausedKey.self] = newValue }
+    }
+}
+
 // MARK: - Stages
 
 /// The frame of every stage: the picture at the pane's width, with a caption under it.
@@ -203,6 +219,7 @@ struct CanvasStage: View {
     var strip: Bool
     var edge: SwitcherEdge
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.picturesPaused) private var paused
     @State private var start = Date()
 
     private static let windows: [CGRect] = [
@@ -211,7 +228,7 @@ struct CanvasStage: View {
     ]
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || paused)) { context in
             let t = reduceMotion ? 0 : context.date.timeIntervalSince(start)
             Canvas { ctx, drawn in
                 let screen = SettingsPictures.screen(in: &ctx, drawn: drawn)
@@ -270,10 +287,11 @@ struct CanvasStage: View {
 struct DragStage: View {
     var placing: SettingsPictures.Placing
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.picturesPaused) private var paused
     @State private var start = Date()
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: reduceMotion || paused)) { context in
             let t = reduceMotion ? SettingsPictures.dragStill
                 : max(0, context.date.timeIntervalSince(start)).truncatingRemainder(dividingBy: SettingsPictures.dragDuration)
             let f = SettingsPictures.dragFrame(placing, at: t)
@@ -327,10 +345,11 @@ struct EffectStage: View {
     /// Tiles start their loops staggered, so the row doesn't open and close as one.
     var phase: Double = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.picturesPaused) private var paused
     @State private var start = Date()
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: reduceMotion || paused)) { context in
             let elapsed = reduceMotion ? SettingsPictures.effectStill + 0.9 : max(0, context.date.timeIntervalSince(start)) + phase
             let f = SettingsPictures.effectFrame(effect, at: elapsed, loop: Int(elapsed / SettingsPictures.effectDuration))
             Canvas { ctx, drawn in

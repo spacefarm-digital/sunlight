@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Canvas
 
@@ -32,5 +33,14 @@ final class SettingsTests: XCTestCase {
             defaults.set("diagonal", forKey: "SwitcherEdge")
             XCTAssertEqual(Settings.switcherEdge, .bottom)
         }
+    }
+
+    /// The Settings window's pictures run only while some of it can be seen: hidden with the app, closed
+    /// or wholly covered, they hold (`SettingsWindowController.isOnScreen`).
+    func testSettingsIsOnScreenOnlyWhenOrderedInAndNotHidden() {
+        XCTAssertTrue(SettingsWindowController.isOnScreen(visible: true, occlusion: [.visible]))
+        XCTAssertFalse(SettingsWindowController.isOnScreen(visible: true, occlusion: []))
+        XCTAssertFalse(SettingsWindowController.isOnScreen(visible: false, occlusion: [.visible]))
+        XCTAssertFalse(SettingsWindowController.isOnScreen(visible: false, occlusion: []))
     }
 }

@@ -184,6 +184,141 @@ final class LiveWindowsConnectionTests: XCTestCase {
         XCTAssertTrue(driver.restore())
     }
 
+    /// A fake add-on that takes `wanted` leases one after the other and answers every frame on them.
+    /// `seen` gets the frames of each lease. `beforeAnswer` is called on the add-on's thread with the
+    /// lease's number and its frames so far, before the last of them is answered, and says whether the
+    /// lease is dropped once it has been (as the Dock drops a session). `finished` is fulfilled when the
+    /// last lease has ended.
+    private func fakeAddOn(leases wanted: Int, seen: Box<[[Data]]>, finished: XCTestExpectation,
+                           beforeAnswer: @escaping @Sendable (_ lease: Int, _ frames: [Data]) -> Bool) -> (path: String, listener: Int32) {
+        let path = "/tmp/sunbeam-test-\(UUID().uuidString).sock"
+        let listener = socket(AF_UNIX, SOCK_STREAM, 0)
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let encoded = Array(path.utf8) + [0]
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: encoded) }
+        _ = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        XCTAssertEqual(listen(listener, 4), 0)
+        DispatchQueue.global().async {
+            var lease = 0
+            while lease < wanted {
+                let client = accept(listener, nil, nil)
+                guard client >= 0 else { break }
+                var yes: Int32 = 1
+                setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
+                // One request: its two-byte length, then that many bytes.
+                let message: () -> Data? = {
+                    var header = [UInt8](repeating: 0, count: 2)
+                    guard recv(client, &header, 2, MSG_WAITALL) == 2 else { return nil }
+                    var body = [UInt8](repeating: 0, count: Int(header[0]) | Int(header[1]) << 8)
+                    guard recv(client, &body, body.count, MSG_WAITALL) == body.count else { return nil }
+                    return Data(header + body)
+                }
+                guard let hello = message() else { Darwin.close(client); continue }
+                if hello == Data([1, 0, 1]) {
+                    // The version the driver asks for before each lease, as the stock listener answers it.
+                    let version = Array("sunlight-57\n".utf8)
+                    _ = version.withUnsafeBytes { Darwin.send(client, $0.baseAddress, $0.count, 0) }
+                    Darwin.close(client)
+                    continue
+                }
+                XCTAssertEqual(hello, Data([1, 0, LiveWindowsWire.session]))
+                _ = LiveWindowsWire.magic.withUnsafeBytes { Darwin.send(client, $0.baseAddress, $0.count, 0) }
+                seen.value.append([])
+                while let frame = message() {
+                    seen.value[lease].append(frame)
+                    let drop = beforeAnswer(lease, seen.value[lease])
+                    var ok: UInt8 = 0
+                    _ = Darwin.send(client, &ok, 1, 0)
+                    if drop { break }
+                }
+                Darwin.close(client)
+                lease += 1
+            }
+            finished.fulfill()
+        }
+        return (path, listener)
+    }
+
+    /// A frame of `ids`, each a 400 × 300 window at `x`, for a canvas whose windows are 7 and 5.
+    private func frame(_ ids: [CGWindowID], _ kind: LiveWindowsWire.FrameKind, x: CGFloat) throws -> Data {
+        let windows = ids.map { LiveWindowsWire.Window(id: $0, worldRect: CGRect(x: x, y: 50, width: 400, height: 300), inset: 0, camera: Camera()) }
+        return try LiveWindowsWire.snapshot(windows, backdrop: 5, overlay: 7, kind: kind)
+    }
+
+    /// A window is parked or woken without a full frame, so the last full frame sent no longer says
+    /// which windows are where. A lease taken after the Dock dropped one starts from the base handed
+    /// over with the partial frame instead, and the partial frame follows it.
+    func testAFreshLeaseStartsFromTheBaseHandedOverSince() throws {
+        let full = try frame([11, 12], .full, x: 100)
+        let base = try frame([11, 12], .full, x: 200)
+        let partial = try frame([11], .partial, x: 300)
+        XCTAssertNotEqual(full, base)
+        let seen = Box<[[Data]]>([])
+        let first = expectation(description: "the first lease had the full frame")
+        let replayed = expectation(description: "the second lease had two frames")
+        let finished = expectation(description: "both leases ended")
+        let addOn = fakeAddOn(leases: 2, seen: seen, finished: finished) { lease, frames in
+            if lease == 0 { first.fulfill(); return true }
+            if frames.count == 2 { replayed.fulfill() }
+            return false
+        }
+        defer { Darwin.close(addOn.listener); unlink(addOn.path) }
+        let failed = expectation(description: "the driver reported a failure")
+        failed.isInverted = true
+        let driver = RealWindowDriver(socketPath: addOn.path)
+        driver.onFailure = { _ in failed.fulfill() }
+        driver.submit(full)
+        wait(for: [first], timeout: 3)
+        driver.submit(partial, full: false, base: base)
+        wait(for: [replayed], timeout: 3)
+        wait(for: [failed], timeout: 0.3)
+        XCTAssertTrue(driver.restore())
+        wait(for: [finished], timeout: 3)
+        XCTAssertEqual(seen.value.count, 2)
+        XCTAssertEqual(seen.value.first, [full])
+        XCTAssertEqual(Array(seen.value.last?.prefix(2) ?? []), [base, partial], "the set as it stands, then the frame in hand")
+    }
+
+    /// A full frame still waiting when a partial one takes its place in the mailbox is never sent. It is
+    /// the newest account of the whole set all the same, and what a fresh lease starts from.
+    func testAFullFrameNeverSentIsWhatAFreshLeaseStartsFrom() throws {
+        let sent = try frame([11, 12], .full, x: 100)
+        let unsent = try frame([11, 12, 13], .full, x: 200)
+        let partial = try frame([11], .partial, x: 300)
+        let seen = Box<[[Data]]>([])
+        let received = expectation(description: "the first frame reached the add-on")
+        let replayed = expectation(description: "the second lease had two frames")
+        let finished = expectation(description: "both leases ended")
+        let answer = DispatchSemaphore(value: 0)
+        let addOn = fakeAddOn(leases: 2, seen: seen, finished: finished) { lease, frames in
+            if lease == 0 {
+                // Held unanswered while the next two frames are submitted, then answered and dropped.
+                received.fulfill()
+                _ = answer.wait(timeout: .now() + 2)
+                return true
+            }
+            if frames.count == 2 { replayed.fulfill() }
+            return false
+        }
+        defer { Darwin.close(addOn.listener); unlink(addOn.path) }
+        let driver = RealWindowDriver(socketPath: addOn.path)
+        driver.submit(sent)
+        wait(for: [received], timeout: 3)
+        driver.submit(unsent)
+        driver.submit(partial, full: false)
+        answer.signal()
+        wait(for: [replayed], timeout: 3)
+        XCTAssertTrue(driver.restore())
+        wait(for: [finished], timeout: 3)
+        XCTAssertEqual(seen.value.first, [sent])
+        XCTAssertEqual(Array(seen.value.last?.prefix(2) ?? []), [unsent, partial])
+    }
+
     func testStalledAdditionTimesOut() throws {
         try withServer({ _ in usleep(600_000) }, check: { path in
             let start = Date()

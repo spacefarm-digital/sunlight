@@ -127,6 +127,28 @@ struct CameraPath {
     }
 }
 
+/// The spring a flight runs on: the switcher's walk and the way into a window. The same move it always
+/// was (`Spring`), a little quicker and with less bounce: the tempo 0.36 s for 0.45, the damping 0.78
+/// for 0.72, so it goes 2 % past the window where it went 4 %, and is at rest (where the real window
+/// can take over) after half a second where it took 0.6.
+enum FlightSpring {
+    static let response: CGFloat = 0.36
+    static let damping: CGFloat = 0.78
+    /// How near the target (in path lengths) and how slow (path lengths a second) counts as there.
+    static let restOffset: CGFloat = 0.002
+    static let restSpeed: CGFloat = 0.02
+
+    /// The spring to fly on, with the tempo and damping tried from the defaults (0 or absent: the
+    /// spring's own), kept to what still reads as this move.
+    static func spring(from speed: CGFloat, response tried: Double = 0, damping triedDamping: Double = 0) -> Spring {
+        Spring(x0: -1, v0: speed,
+               response: tried > 0 ? CGFloat(min(max(tried, 0.2), 0.8)) : response,
+               damping: triedDamping > 0 ? CGFloat(min(max(triedDamping, 0.5), 1)) : damping)
+    }
+
+    static func isAtRest(_ x: CGFloat, _ v: CGFloat) -> Bool { abs(x) < restOffset && abs(v) < restSpeed }
+}
+
 /// A damped spring in closed form, pulling a scalar toward 0 from offset `x0` with velocity `v0`.
 /// Under-damped on purpose: the slight overshoot is the rubber band at the end of a flight.
 struct Spring {

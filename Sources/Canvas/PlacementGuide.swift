@@ -170,6 +170,7 @@ struct PlacingChapter: View {
 struct DemoView: View {
     let demo: PlacementGuide.Demo
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.picturesPaused) private var paused
     @Environment(\.colorScheme) private var scheme
     @State private var placed = false
     @State private var shown = true
@@ -196,7 +197,8 @@ struct DemoView: View {
         .frame(width: PlacementGuide.box.width, height: PlacementGuide.box.height, alignment: .topLeading)
         .scaleEffect(placed ? demo.pullBack : 1, anchor: .center)
         .opacity(shown ? 1 : 0)
-        .task { await run() }
+        // Again from the top when the window comes back: the loop stops while nobody can see it.
+        .task(id: paused) { await run() }
         .accessibilityHidden(true)
     }
 
@@ -205,8 +207,9 @@ struct DemoView: View {
             placed = true
             return
         }
-        while !Task.isCancelled {
+        while !paused, !Task.isCancelled {
             try? await Task.sleep(for: .seconds(1.0))
+            if Task.isCancelled { return }
             withAnimation(.spring(response: 0.6, dampingFraction: 0.82)) { placed = true }
             try? await Task.sleep(for: .seconds(2.6))
             withAnimation(.easeInOut(duration: 0.25)) { shown = false }

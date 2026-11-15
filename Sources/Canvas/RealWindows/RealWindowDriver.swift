@@ -17,8 +17,13 @@ final class RealWindowDriver: @unchecked Sendable {
     /// Window alphas still to send (`LiveWindowsWire.alpha`), the latest for each window: merged rather
     /// than replaced with the frame, so a window's last alpha (back to 1) is never lost to a newer frame.
     private var pendingAlpha: [CGWindowID: Float] = [:]
-    /// The last full frame (every leased window): what a fresh lease gets first when the frame in hand
-    /// is partial, so the windows that frame leaves out are taken too. Worker only.
+    /// A full frame of every leased window where it stands, handed over with a partial frame to start a
+    /// fresh lease from in place of the last full one sent (`submit`'s `base`): the latest, kept until a
+    /// frame is taken, as the alphas are.
+    private var pendingBase: Data?
+    /// The last full frame (every leased window), or the base that has replaced it since: what a fresh
+    /// lease gets first when the frame in hand is partial, so the windows that frame leaves out are
+    /// taken too. Worker only.
     private var lastFull: Data?
     private var scheduled = false
     private var generation = 0
@@ -189,10 +194,7 @@ final class RealWindowDriver: @unchecked Sendable {
                 if fresh, !full, let lastFull { try leased.acknowledge(lastFull) }
                 let started = CACurrentMediaTime()
                 try leased.acknowledge(data)
-                PerfMonitor.shared.dockRoundTrip(CACurrentMediaTime() - started)
-                if full {   // TEMP diagnostics
-                    Log.note("Rendering: full frame acked in \(Int((CACurrentMediaTime() - started) * 1000)) ms, \(Int((CACurrentMediaTime() - submitted) * 1000)) ms after submit\(fresh ? " (fresh lease)" : "")")
-                }
+                PerfMonitor.shared.dockRoundTrip(CACurrentMediaTime() - started, full: full)
                 if full { lastFull = data }
                 if let shadow { sendShadow(shadow, on: leased) }
                 sendAlpha(alphas, on: leased)
@@ -214,9 +216,18 @@ final class RealWindowDriver: @unchecked Sendable {
     /// every leased window (a legacy frame always does), so a fresh lease can start from it.
     /// `alphas`: windows whose alpha changed this tick (a window opening or closing), sent after the
     /// frame when the add-on takes them (sunlight-40).
-    func submit(_ data: Data, shadow: Data? = nil, full: Bool = true, alphas: [CGWindowID: Float] = [:]) {
+    /// `base`, with a partial frame: a full frame of every leased window as it stands now, not sent
+    /// unless the lease is lost. The windows a partial frame leaves out stay where the Dock has them, so
+    /// which ones those are can change without a full frame; a fresh lease has to start from the set as
+    /// it is, not as the last full frame had it (a window parked since would be left where that frame
+    /// put it, in view perhaps).
+    func submit(_ data: Data, shadow: Data? = nil, full: Bool = true, base: Data? = nil, alphas: [CGWindowID: Float] = [:]) {
         lock.lock()
+        // A full frame still waiting when a partial one takes its place is never sent; it is still the
+        // newest account of the whole set, so it becomes the base unless this frame brings its own.
+        let unsent = pending.flatMap { $0.full ? $0.frame : nil }
         pending = (data, shadow, full, CACurrentMediaTime())
+        if full { pendingBase = nil } else if let base = base ?? unsent { pendingBase = base }
         pendingAlpha.merge(alphas) { _, new in new }
         if scheduled { lock.unlock(); return }
         scheduled = true
@@ -230,7 +241,10 @@ final class RealWindowDriver: @unchecked Sendable {
                 pending = nil
                 let alphas = pendingAlpha
                 pendingAlpha = [:]
+                let base = pendingBase
+                pendingBase = nil
                 lock.unlock()
+                if let base, !next.full { lastFull = base }
                 do {
                     try deliver(next.frame, shadow: next.shadow, alphas: alphas, full: next.full, submitted: next.at, epoch: epoch)
                 } catch {
@@ -284,7 +298,7 @@ final class RealWindowDriver: @unchecked Sendable {
     func restore(handoff: (CGWindowID, CGPoint)? = nil, overlay: CGWindowID = 0, backdrop: CGWindowID = 0,
                  shadow: Data? = nil, keeping kept: [(CGWindowID, CGPoint)] = [], top: CGFloat? = nil, above: pid_t = 0,
                  pinned: [CGWindowID] = []) -> Bool {
-        lock.lock(); generation += 1; pending = nil; pendingAlpha = [:]; scheduled = false; lock.unlock()
+        lock.lock(); generation += 1; pending = nil; pendingAlpha = [:]; pendingBase = nil; scheduled = false; lock.unlock()
         return Watchdog.during("the Dock's answer to a handoff or release (RealWindowDriver.restore)") { queue.sync {
             defer { connection?.close(); connection = nil }
             lastRestoreFailure = nil

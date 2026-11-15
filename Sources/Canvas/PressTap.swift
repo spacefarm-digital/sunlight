@@ -45,6 +45,8 @@ final class PressTap: @unchecked Sendable {
         case doubleClick(at: CGPoint)
         /// A click, when clicks are the canvas's (`setClickIsCanvas`): zoom the window in.
         case singleClick(at: CGPoint)
+        /// A ⌘-click, when clicks are the canvas's: focus the window where it is.
+        case commandClick(at: CGPoint)
         /// A click posted on to the app: the window is in use from here on.
         case clicked(at: CGPoint)
         case dragBegin(at: CGPoint)
@@ -391,6 +393,7 @@ final class PressTap: @unchecked Sendable {
             case (.holding(let down, let start, let role, let clicks), .leftMouseUp):
                 s.phase = .idle
                 if clicks >= 2 { outcomes = [.swallow, .send(.doubleClick(at: start))] }
+                else if s.clickIsCanvas, down.flags.contains(.maskCommand) { outcomes = [.swallow, .send(.commandClick(at: start))] }
                 else if s.clickIsCanvas { outcomes = [.swallow, .send(.singleClick(at: start))] }
                 else { outcomes = [.click(down, event), .send(.clicked(at: start))] }
             case (.holding(let down, let start, let role, _), .leftMouseDragged):

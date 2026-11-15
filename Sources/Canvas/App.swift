@@ -110,6 +110,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // this copy goes, nothing else comes up.
         if MoveToApplications.offerIfNeeded() { return }
         Watchdog.shared.start()
+        // With `PerfLog` on: what the app has open, for the line a jump in memory gets.
+        PerfMonitor.shared.census = {
+            let windows = NSApp.windows.map { w -> String in
+                let name = w.title.isEmpty ? String(describing: type(of: w)) : w.title
+                return "\(name) \(Int(w.frame.width))×\(Int(w.frame.height))\(w.isVisible ? "" : " hidden")"
+            }
+            return "\(windows.count) windows: \(windows.joined(separator: ", "))"
+        }
+        PerfMonitor.shared.start()
         Stability.startGuard()
         DispatchQueue.global(qos: .utility).async { CrashReports.collect() }
         DispatchQueue.main.asyncAfter(deadline: .now() + Stability.settleTime) { MainActor.assumeIsolated { Stability.settle() } }
@@ -684,7 +693,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
 
     private func showSettings(tab: SettingsWindowController.Tab) {
-        settingsController()?.show(tab: tab)
+        Watchdog.during("opening Settings (showSettings)") {
+            let settings = settingsController()
+            settings?.show(tab: tab)
+        }
     }
 
     private func settingsController() -> SettingsWindowController? {
@@ -693,6 +705,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             settings = SettingsWindowController(background: canvas.background, onRendererChange: { [weak self] renderer in
                 self?.canvas?.configureRenderer(renderer)
             }, onSetup: { [weak self] in self?.showSetup() })
+            // Closed, the window goes altogether: left alive it kept some 200 MB of panes and pictures.
+            // A turn later, so it isn't released from inside its own close; not if it was reopened by then.
+            settings?.onClose = { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self, let settings = self.settings, settings.window?.isVisible != true else { return }
+                    self.settings = nil
+                    Log.note("Settings: closed — the window is let go")
+                }
+            }
             settings?.onTryPlacing = { [weak self] scope in
                 guard let canvas = self?.canvas else { return }
                 switch scope {

@@ -85,4 +85,47 @@ final class OpenHereTests: XCTestCase {
                       item("New Private Window", key: "N", commandOnly: false)]
         XCTAssertNil(NewWindowMenu.windowCommandN(editor))
     }
+
+    // MARK: ⌘N, remembered
+
+    func testAnAppsCommandNIsReadOnceAndThenTakenAsRead() {
+        var memory = CommandNMemory()
+        XCTAssertNil(memory.makes(7))
+        XCTAssertTrue(memory.needsReading(7, now: 100))
+        XCTAssertNil(memory.note(7, makes: true, settled: true, now: 100))
+        XCTAssertEqual(memory.makes(7), true)
+        XCTAssertFalse(memory.needsReading(7, now: 100 + CommandNMemory.keepFor - 1))
+        XCTAssertTrue(memory.needsReading(7, now: 100 + CommandNMemory.keepFor))
+        XCTAssertTrue(memory.needsReading(8, now: 101), "another app is its own question")
+        XCTAssertEqual(memory.note(7, makes: false, settled: true, now: 800), true)
+        XCTAssertEqual(memory.makes(7), false)
+    }
+
+    func testAnAppStillStartingIsAskedAgainSoon() {
+        var memory = CommandNMemory()
+        memory.note(7, makes: false, settled: false, now: 100)
+        XCTAssertFalse(memory.needsReading(7, now: 105))
+        XCTAssertTrue(memory.needsReading(7, now: 100 + CommandNMemory.unsettledFor))
+    }
+
+    func testAMenuThatCouldNotBeReadKeepsTheLastAnswerAndIsReadAgain() {
+        var memory = CommandNMemory()
+        memory.note(7, makes: nil, settled: true, now: 100)
+        XCTAssertNil(memory.makes(7))
+        XCTAssertTrue(memory.needsReading(7, now: 100))
+        memory.note(7, makes: true, settled: true, now: 101)
+        XCTAssertEqual(memory.note(7, makes: nil, settled: true, now: 110), true)
+        XCTAssertEqual(memory.makes(7), true)
+        XCTAssertTrue(memory.needsReading(7, now: 110))
+    }
+
+    func testCommandNPressedOrTheAppGoneMeansReadingAgain() {
+        var memory = CommandNMemory()
+        memory.note(7, makes: true, settled: true, now: 100)
+        memory.readAgain(7)
+        XCTAssertEqual(memory.makes(7), true, "the answer stands until the next read")
+        XCTAssertTrue(memory.needsReading(7, now: 101))
+        memory.forget(7)
+        XCTAssertNil(memory.makes(7))
+    }
 }

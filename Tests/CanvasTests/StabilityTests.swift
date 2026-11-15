@@ -273,6 +273,62 @@ final class StabilityTests: XCTestCase {
         XCTAssertNil(watchdog.step(.beforeTimers, at: 160.4))
     }
 
+    /// Shorter than a stall and long enough to drop a dozen frames: a hitch, found by the same steps.
+    func testAShorterGapIsAHitchAndNotAStall() {
+        let watchdog = Watchdog()
+        XCTAssertEqual(watchdog.take(.afterWaiting, at: 100), Watchdog.Step())
+        XCTAssertEqual(watchdog.take(.beforeTimers, at: 100.05), Watchdog.Step())
+        XCTAssertEqual(watchdog.take(.beforeSources, at: 100.25), Watchdog.Step(hitch: Watchdog.Stall(ms: 200, label: nil)))
+        XCTAssertEqual(watchdog.take(.beforeTimers, at: 100.95), Watchdog.Step(stall: Watchdog.Stall(ms: 700, label: nil)))
+        // Asleep is neither, however long.
+        XCTAssertEqual(watchdog.take(.beforeWaiting, at: 101), Watchdog.Step())
+        XCTAssertEqual(watchdog.take(.afterWaiting, at: 160), Watchdog.Step())
+    }
+
+    /// A call inside `during` that took a hitch's time names the hitch, and only that one.
+    @MainActor
+    func testANamedCallNamesTheHitch() {
+        let watchdog = Watchdog.shared
+        _ = watchdog.take(.beforeWaiting, at: 1)
+        XCTAssertEqual(watchdog.take(.afterWaiting, at: 2000), Watchdog.Step())
+        Watchdog.during("a brief test call") { Thread.sleep(forTimeInterval: Watchdog.hitch + 0.05) }
+        XCTAssertEqual(watchdog.take(.beforeSources, at: 2000.2), Watchdog.Step(hitch: Watchdog.Stall(ms: 200, label: "a brief test call")))
+        XCTAssertEqual(watchdog.take(.beforeTimers, at: 2000.4), Watchdog.Step(hitch: Watchdog.Stall(ms: 200, label: nil)))
+        _ = watchdog.take(.beforeWaiting, at: 2002)
+    }
+
+    /// A slow call made from inside another named call: the hitch says both, the outer one first. A slow
+    /// call after it in the same step doesn't take the name over.
+    @MainActor
+    func testANamedCallInsideAnotherNamesThePath() {
+        let watchdog = Watchdog.shared
+        _ = watchdog.take(.beforeWaiting, at: 1)
+        XCTAssertEqual(watchdog.take(.afterWaiting, at: 3000), Watchdog.Step())
+        Watchdog.during("taking a window in") {
+            Watchdog.during("a quick question") { }
+            Watchdog.during("a slow question") { Thread.sleep(forTimeInterval: Watchdog.hitch + 0.05) }
+        }
+        Watchdog.during("something after it") { Thread.sleep(forTimeInterval: Watchdog.hitch + 0.05) }
+        XCTAssertEqual(watchdog.take(.beforeSources, at: 3000.3),
+                       Watchdog.Step(hitch: Watchdog.Stall(ms: 300, label: "taking a window in › a slow question")))
+        XCTAssertEqual(Watchdog.path("outer", over: nil), "outer")
+        _ = watchdog.take(.beforeWaiting, at: 3002)
+    }
+
+    /// Calls that are each only a hitch long can add up to a stall: the first of them names it.
+    @MainActor
+    func testBriefCallsThatAddUpToAStallNameIt() {
+        let watchdog = Watchdog.shared
+        _ = watchdog.take(.beforeWaiting, at: 1)
+        XCTAssertEqual(watchdog.take(.afterWaiting, at: 4000), Watchdog.Step())
+        Watchdog.during("the first of two") { Thread.sleep(forTimeInterval: Watchdog.hitch + 0.05) }
+        Watchdog.during("the second of two") { Thread.sleep(forTimeInterval: Watchdog.hitch + 0.05) }
+        XCTAssertEqual(watchdog.take(.beforeSources, at: 4000.6),
+                       Watchdog.Step(stall: Watchdog.Stall(ms: 600, label: "the first of two")))
+        XCTAssertEqual(watchdog.take(.beforeTimers, at: 4000.8), Watchdog.Step(hitch: Watchdog.Stall(ms: 200, label: nil)))
+        _ = watchdog.take(.beforeWaiting, at: 4002)
+    }
+
     /// A slow call inside `during` names the stall it's part of, and only that one.
     @MainActor
     func testASlowNamedCallNamesTheStall() {

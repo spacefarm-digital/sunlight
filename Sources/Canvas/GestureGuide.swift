@@ -367,10 +367,11 @@ struct GestureStage: View {
     /// The tutorial's mouse steps: the same loop on the canvas, done with a mouse.
     var mouse: MouseCue? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.picturesPaused) private var paused
     @State private var start = Date()
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: reduceMotion || paused)) { context in
             let t = reduceMotion ? gesture.still : max(0, context.date.timeIntervalSince(start)).truncatingRemainder(dividingBy: gesture.duration)
             let frame = GestureGuide.frame(for: gesture, at: t)
             HStack(spacing: 32 * scale) {

@@ -124,7 +124,13 @@ final class ForegroundWatcher {
         observedPID = 0
     }
 
+    /// Named for the watchdog: what the canvas does about an app's word runs on the main thread, and a
+    /// hitch in it says which word it was.
     private func axEvent(pid: pid_t, name: String, element: AXUIElement) {
+        Watchdog.during("the app's word of \(name)") { axEventNow(pid: pid, name: name, element: element) }
+    }
+
+    private func axEventNow(pid: pid_t, name: String, element: AXUIElement) {
         switch name {
         case kAXFocusedWindowChangedNotification: onFocusedWindowChanged?(pid, element)
         case kAXWindowCreatedNotification: onWindowCreated?(pid, element)

@@ -20,9 +20,17 @@ struct WindowInfo: Sendable {
 enum WindowList {
     static let queue = DispatchQueue(label: "canvas.windowlist", qos: .userInitiated)
 
+    /// The window server's answer, named for the watchdog: usually a millisecond, but the window server
+    /// has slow moments (a window opening, a sheet coming down), and this is often asked on the main thread.
+    private nonisolated static func copy(_ option: CGWindowListOption, _ window: CGWindowID = kCGNullWindowID) -> [[String: Any]]? {
+        Watchdog.during("the window server's list (CGWindowListCopyWindowInfo)") {
+            CGWindowListCopyWindowInfo(option, window) as? [[String: Any]]
+        }
+    }
+
     /// Every window on screen, front to back, on the current Space. Call it on `queue`.
     nonisolated static func onScreen() -> [WindowInfo] {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+        guard let list = copy([.optionOnScreenOnly]) else {
             return []
         }
         return list.compactMap { d in
@@ -42,7 +50,7 @@ enum WindowList {
     /// button, asked only for a click already on the button's spot.
     nonisolated static func front(at point: CGPoint) -> (id: CGWindowID, bounds: CGRect)? {
         let me = ProcessInfo.processInfo.processIdentifier
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        guard let list = copy([.optionOnScreenOnly, .excludeDesktopElements]) else { return nil }
         for d in list {
             guard let id = (d[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
                   (d[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value != me,
@@ -56,7 +64,7 @@ enum WindowList {
 
     /// One window, if it's on screen: for watching for a single window without listing them all.
     nonisolated static func onScreen(_ id: CGWindowID) -> WindowInfo? {
-        guard id != 0, let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]],
+        guard id != 0, let list = copy([.optionIncludingWindow], id),
               let d = list.first, (d[kCGWindowIsOnscreen as String] as? Bool) == true,
               let pid = (d[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
               let layer = (d[kCGWindowLayer as String] as? NSNumber)?.intValue,
@@ -80,7 +88,7 @@ enum WindowList {
             var cid: Int32 = 0
             return owner.call(owner.connection, id, &cid) == 0
         }
-        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return false }
+        guard let list = copy([.optionAll]) else { return false }
         return list.contains { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == id }
     }
 
@@ -88,7 +96,7 @@ enum WindowList {
     /// another Space. (The Dock's minimize animation runs with the window still on screen; it leaves the
     /// screen as the animation ends.)
     nonisolated static func isOnScreen(_ id: CGWindowID) -> Bool {
-        guard id != 0, let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]],
+        guard id != 0, let list = copy([.optionIncludingWindow], id),
               let entry = list.first else { return false }
         return (entry[kCGWindowIsOnscreen as String] as? Bool) ?? false
     }

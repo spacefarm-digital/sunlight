@@ -40,9 +40,9 @@ final class BackgroundRenderer {
     private var prepared: Prepared?
     private var generation = 0
     /// The styled picture and the blur levels made from it so far, by level.
-    private var levels: [Int: CGImage] = [:]
+    private var levels: [Int: BackgroundPipeline.Picture] = [:]
     private var levelsInFlight: Set<Int> = []
-    private var grainImage: CGImage?
+    private var grainImage: BackgroundPipeline.Picture?
 
     /// Whether black ink reads better than white on what's behind the windows now.
     private(set) var isLight = false
@@ -281,9 +281,11 @@ final class BackgroundRenderer {
             let base = pipeline.styled(raw, style: style, tint: tint, darken: darkenAlone) ?? raw
             let luminance = pipeline.average(base).luminance
             let thumbnails = pipeline.thumbnails(raw, tint: tint, size: BackgroundRenderer.thumbnailSize)
+            // Into a surface for the layer; the images made on the way are let go as this block ends.
+            let picture = pipeline.picture(base)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self.pictureReady(base, luminance: luminance, dominant: dominant, thumbnails: thumbnails, generation: gen)
+                    self.pictureReady(picture, luminance: luminance, dominant: dominant, thumbnails: thumbnails, generation: gen)
                 }
             }
         }
@@ -299,9 +301,10 @@ final class BackgroundRenderer {
         onThumbnailsChanged?()
     }
 
-    private func pictureReady(_ base: CGImage, luminance: CGFloat, dominant: NSColor,
+    private func pictureReady(_ base: BackgroundPipeline.Picture, luminance: CGFloat, dominant: NSColor,
                               thumbnails: [BackgroundSpec.Style: CGImage], generation gen: Int) {
         guard gen == generation else { return }
+        Log.note("Background: a \(base.width) × \(base.height) picture, \(base.surface != nil ? "in a surface shared with the window server" : "as an image")")
         let hadPicture = !levels.isEmpty
         levels = [0: base]
         dominantTint = dominant
@@ -315,7 +318,7 @@ final class BackgroundRenderer {
         CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
         let sharp = levelLayers[0]
         let from = sharp.contents
-        sharp.contents = base
+        sharp.contents = base.contents
         sharp.opacity = 1
         if let from, hadPicture {
             let fade = CABasicAnimation(keyPath: "contents")
@@ -361,8 +364,8 @@ final class BackgroundRenderer {
         let needed = Set([Int(position.rounded(.down)), Int(position.rounded(.up))]).filter { $0 >= 1 }
         // Made levels are kept for the picture's life: a level let go when the zoom moved away was made
         // again only once the zoom came back, so every zoom out (every return from a window) showed the
-        // picture sharper for a moment and then faded the blur in. That was the blink. Four levels at half
-        // scale are a few screens of pixels at most.
+        // picture sharper for a moment and then faded the blur in. That was the blink. They are small: the
+        // wider the blur, the fewer pixels it is made of (`BackgroundPipeline.scale(forSigma:)`).
         for level in needed.sorted() where levels[level] == nil && !levelsInFlight.contains(level) {
             levelsInFlight.insert(level)
             let gen = generation
@@ -377,7 +380,7 @@ final class BackgroundRenderer {
         }
     }
 
-    private func levelReady(_ level: Int, _ image: CGImage?, generation gen: Int) {
+    private func levelReady(_ level: Int, _ image: BackgroundPipeline.Picture?, generation gen: Int) {
         guard gen == generation else { return }
         levelsInFlight.remove(level)
         guard let image else { return }
@@ -385,7 +388,7 @@ final class BackgroundRenderer {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let layer = levelLayers[level]
-        layer.contents = image
+        layer.contents = image.contents
         layer.isHidden = false
         applyFocus()
         // It arrives at the opacity the zoom asks for, with a short fade rather than a pop.
@@ -454,7 +457,7 @@ final class BackgroundRenderer {
                     MainActor.assumeIsolated {
                         guard gen == self.generation, let image else { return }
                         self.grainImage = image
-                        self.grainLayer.contents = image
+                        self.grainLayer.contents = image.contents
                         self.tune(animated: true)
                     }
                 }

@@ -69,30 +69,36 @@ struct AXWindow: @unchecked Sendable {
     /// Whether the app names the window among its windows; nil when it doesn't answer (busy, quitting,
     /// or with no Accessibility at all), which is never taken for a no.
     static func names(windowID: CGWindowID, pid: pid_t) -> Bool? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(application(pid, timeout: 1.0), kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return nil }
-        return windows.contains { AXWindow(element: $0, pid: pid).windowID == windowID }
+        Watchdog.during("Accessibility: whether an app names a window (AXWindow.names)") {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(application(pid, timeout: 1.0), kAXWindowsAttribute as CFString, &value) == .success,
+                  let windows = value as? [AXUIElement] else { return nil }
+            return windows.contains { AXWindow(element: $0, pid: pid).windowID == windowID }
+        }
     }
 
     /// The app's windows by window ID; nil when it doesn't answer.
     static func windowsByID(pid: pid_t) -> [CGWindowID: AXWindow]? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(application(pid, timeout: 1.0), kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return nil }
-        var byID: [CGWindowID: AXWindow] = [:]
-        for element in windows {
-            let w = AXWindow(element: element, pid: pid)
-            if let id = w.windowID { byID[id] = w }
+        Watchdog.during("Accessibility: an app's windows (AXWindow.windowsByID)") {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(application(pid, timeout: 1.0), kAXWindowsAttribute as CFString, &value) == .success,
+                  let windows = value as? [AXUIElement] else { return nil }
+            var byID: [CGWindowID: AXWindow] = [:]
+            for element in windows {
+                let w = AXWindow(element: element, pid: pid)
+                if let id = w.windowID { byID[id] = w }
+            }
+            return byID
         }
-        return byID
     }
 
     /// Whether the app has destroyed this handle's window, as far as Accessibility goes: only an answer
     /// of "invalid element" says so. A slow or silent app, or one that answers anything at all, says no.
     var isDestroyed: Bool {
-        var value: CFTypeRef?
-        return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .invalidUIElement
+        Watchdog.during("Accessibility: whether a window is gone (AXWindow.isDestroyed)") {
+            var value: CFTypeRef?
+            return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .invalidUIElement
+        }
     }
 
     static func focusedWindow(pid: pid_t) -> AXWindow? {
@@ -106,22 +112,28 @@ struct AXWindow: @unchecked Sendable {
         return AXWindow(element: value as! AXUIElement, pid: pid)
     }
 
+    /// The window server's id for the window. Asked of the app like any attribute: a round trip, and a
+    /// busy app answers it late.
     var windowID: CGWindowID? {
-        var id: CGWindowID = 0
-        return _AXUIElementGetWindow(element, &id) == .success ? id : nil
+        Watchdog.during("Accessibility: a window's id (AXWindow.windowID)") {
+            var id: CGWindowID = 0
+            return _AXUIElementGetWindow(element, &id) == .success ? id : nil
+        }
     }
 
     var frame: CGRect? { Watchdog.during("Accessibility: a window's frame (AXWindow.frame)") { element.frame } }
 
     /// Native fullscreen: the window lives on its own Space and refuses to be moved.
-    var isFullScreen: Bool { element.bool("AXFullScreen") }
+    var isFullScreen: Bool { Watchdog.during("Accessibility: whether a window is in full screen (AXWindow.isFullScreen)") { element.bool("AXFullScreen") } }
 
-    var isMinimized: Bool { element.bool(kAXMinimizedAttribute) }
+    var isMinimized: Bool { Watchdog.during("Accessibility: whether a window is minimized (AXWindow.isMinimized)") { element.bool(kAXMinimizedAttribute) } }
 
     /// The file a document window shows (TextEdit, Preview, Xcode); nil for any other window.
     var document: URL? {
-        guard let s = element.string(kAXDocumentAttribute), let url = URL(string: s), url.isFileURL else { return nil }
-        return url
+        Watchdog.during("Accessibility: a window's document (AXWindow.document)") {
+            guard let s = element.string(kAXDocumentAttribute), let url = URL(string: s), url.isFileURL else { return nil }
+            return url
+        }
     }
 
     /// Into the Dock, as ⌘M or the yellow button would.
@@ -134,10 +146,12 @@ struct AXWindow: @unchecked Sendable {
 
     /// Whether the window's green button can be pressed (a window that can't be resized has it greyed).
     var zoomButtonEnabled: Bool {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXZoomButtonAttribute as CFString, &ref) == .success,
-              let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return false }
-        return (ref as! AXUIElement).bool(kAXEnabledAttribute)
+        Watchdog.during("Accessibility: a window's green button (AXWindow.zoomButtonEnabled)") {
+            var ref: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXZoomButtonAttribute as CFString, &ref) == .success,
+                  let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return false }
+            return (ref as! AXUIElement).bool(kAXEnabledAttribute)
+        }
     }
 
     /// Out of macOS's own full screen, back onto the Desktop it came from. False if the app refused.
@@ -149,21 +163,27 @@ struct AXWindow: @unchecked Sendable {
 
     @discardableResult
     func unminimize() -> Bool {
-        AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success
+        Watchdog.during("Accessibility: out of the Dock (AXWindow.unminimize)") {
+            AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success
+        }
     }
 
     @discardableResult
     func setPosition(_ point: CGPoint) -> Bool {
         var p = point
         guard let v = AXValueCreate(.cgPoint, &p) else { return false }
-        return AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, v) == .success
+        return Watchdog.during("Accessibility: moving a window (AXWindow.setPosition)") {
+            AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, v) == .success
+        }
     }
 
     @discardableResult
     func setSize(_ size: CGSize) -> Bool {
         var s = size
         guard let v = AXValueCreate(.cgSize, &s) else { return false }
-        return AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, v) == .success
+        return Watchdog.during("Accessibility: sizing a window (AXWindow.setSize)") {
+            AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, v) == .success
+        }
     }
 
     /// Brings this window to the front *within its app*. Activating the app then makes it frontmost overall.
@@ -177,16 +197,18 @@ struct AXWindow: @unchecked Sendable {
     /// Where the window's red, yellow and green buttons are (`TrafficLights.Layout`), from their frames;
     /// nil for a window without them.
     var trafficLights: TrafficLights.Layout? {
-        guard let window = frame else { return nil }
-        func button(_ attribute: String) -> CGRect? {
-            var ref: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, attribute as CFString, &ref) == .success,
-                  let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
-            return (ref as! AXUIElement).frame
+        Watchdog.during("Accessibility: a window's buttons (AXWindow.trafficLights)") {
+            guard let window = frame else { return nil }
+            func button(_ attribute: String) -> CGRect? {
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, attribute as CFString, &ref) == .success,
+                      let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
+                return (ref as! AXUIElement).frame
+            }
+            return TrafficLights.Layout.measured(window: window, close: button(kAXCloseButtonAttribute),
+                                                 minimize: button(kAXMinimizeButtonAttribute),
+                                                 zoom: button(kAXZoomButtonAttribute))
         }
-        return TrafficLights.Layout.measured(window: window, close: button(kAXCloseButtonAttribute),
-                                             minimize: button(kAXMinimizeButtonAttribute),
-                                             zoom: button(kAXZoomButtonAttribute))
     }
 
     /// Presses the window's close button, exactly as a click on the red button would (so an unsaved
@@ -262,18 +284,22 @@ extension AXUIElement {
     /// Whether a press here is on a control the app drags itself: a scroll bar or its thumb, a slider,
     /// a pane divider, a resize handle. A drag anywhere else moves the window on the canvas.
     var isDraggedControl: Bool {
-        guard let role = string(kAXRoleAttribute) else { return false }
-        let controls: Set<String> = [kAXScrollBarRole, kAXSliderRole, kAXValueIndicatorRole, kAXSplitterRole,
-                                     kAXHandleRole, kAXGrowAreaRole, kAXIncrementorRole, kAXColorWellRole]
-        if controls.contains(role) { return true }
-        // A scroll bar's thumb reports as its own kind of element in some apps; its parent tells.
-        return parent?.string(kAXRoleAttribute) == kAXScrollBarRole
+        Watchdog.during("Accessibility: what is under the pointer (AXUIElement.isDraggedControl)") {
+            guard let role = string(kAXRoleAttribute) else { return false }
+            let controls: Set<String> = [kAXScrollBarRole, kAXSliderRole, kAXValueIndicatorRole, kAXSplitterRole,
+                                         kAXHandleRole, kAXGrowAreaRole, kAXIncrementorRole, kAXColorWellRole]
+            if controls.contains(role) { return true }
+            // A scroll bar's thumb reports as its own kind of element in some apps; its parent tells.
+            return parent?.string(kAXRoleAttribute) == kAXScrollBarRole
+        }
     }
 
     /// The deepest element at a global point (top-left origin), asked of the app.
     static func element(at point: CGPoint, pid: pid_t) -> AXUIElement? {
-        var ref: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid), Float(point.x), Float(point.y), &ref) == .success else { return nil }
-        return ref
+        Watchdog.during("Accessibility: the element at a point (AXUIElement.element(at:))") {
+            var ref: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid), Float(point.x), Float(point.y), &ref) == .success else { return nil }
+            return ref
+        }
     }
 }

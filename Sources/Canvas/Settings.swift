@@ -494,7 +494,8 @@ enum Settings {
     }
 
     /// With windows used at any zoom: single and double click swapped. Off, a click focuses the window
-    /// where it is and a double-click zooms it in; on, a click zooms in and a double-click focuses.
+    /// where it is and a double-click zooms it in; on, a click does what that double-click does (the
+    /// window to the middle at 1:1, focused, at once) and a ⌘-click focuses it where it is.
     static var scaledClickZooms: Bool {
         get { defaults.bool(forKey: scaledClickZoomsKey) }
         set { defaults.set(newValue, forKey: scaledClickZoomsKey) }
@@ -693,6 +694,10 @@ final class SettingsWindowController: NSWindowController {
     private let model: SettingsModel
     private let tabs: SettingsTabController
 
+    /// The window closed: the app lets the whole of it go (its panes, their pictures, the memory they
+    /// hold) and builds it again on the next ⌘,.
+    var onClose: (() -> Void)?
+
     /// Settings › How to use › Placing › Try: the command, on the canvas behind.
     var onTryPlacing: ((PlacementGuide.Scope) -> Void)? {
         get { model.onTryPlacing }
@@ -816,6 +821,26 @@ final class SettingsWindowController: NSWindowController {
             window?.orderFrontRegardless()
             window?.makeKey()
         }
+        noteOnScreen()
+    }
+
+    /// Whether any of the window can be seen. It hides when Sunlight stops being the active app and stays
+    /// alive when closed, and a pane's moving picture or its once-a-second refresh, left running, redraws
+    /// a window nobody sees (12% of a core for a day, measured): off screen, they hold.
+    private func noteOnScreen() {
+        guard let window else { return }
+        setOnScreen(Self.isOnScreen(visible: window.isVisible, occlusion: window.occlusionState))
+    }
+
+    private func setOnScreen(_ shown: Bool) {
+        guard model.onScreen != shown else { return }
+        model.onScreen = shown
+        Log.note("Settings: \(shown ? "on screen" : "off screen — its pictures and refreshes hold")")
+    }
+
+    /// Ordered in, and not wholly covered or hidden: what the window server says, not only AppKit.
+    nonisolated static func isOnScreen(visible: Bool, occlusion: NSWindow.OcclusionState) -> Bool {
+        visible && occlusion.contains(.visible)
     }
 }
 
@@ -823,6 +848,12 @@ extension SettingsWindowController: NSWindowDelegate {
     /// Close the colour panel with the settings, so it stops driving the canvas.
     func windowWillClose(_ notification: Notification) {
         if NSColorPanel.sharedColorPanelExists { NSColorPanel.shared.orderOut(nil) }
+        setOnScreen(false)
+        onClose?()
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        noteOnScreen()
     }
 }
 
@@ -935,7 +966,14 @@ final class SettingsModel: ObservableObject {
     var onTryPlacing: ((PlacementGuide.Scope) -> Void)?
     var onTutorial: (() -> Void)?
     /// Settings › How to use's chapter: the window's ⌘? and the ? in Settings › Windows pick one.
-    @Published var howToUseChapter: Manual.Chapter = .basics
+    @Published var howToUseChapter: Manual.Chapter = SettingsModel.lastChapter {
+        didSet { Self.lastChapter = howToUseChapter }
+    }
+    /// The chapter How to use was left on, kept past the window: closing it lets the model go.
+    private static var lastChapter: Manual.Chapter = .basics
+    /// Whether the window can be seen (`SettingsWindowController.noteOnScreen`). Off, the panes' moving
+    /// pictures and refreshes hold.
+    @Published var onScreen = false
     /// Switches the window's pane, for the ? in Settings › Windows.
     var selectTab: ((Tab) -> Void)?
     var onMinimapChange: ((Bool) -> Void)?
@@ -1108,6 +1146,7 @@ private struct SettingsPane: View {
             }
             .frame(width: SettingsWindowController.paneSize.width)
             .frame(maxHeight: .infinity)
+            .environment(\.picturesPaused, !model.onScreen)
     }
 
     @ViewBuilder
@@ -1938,7 +1977,7 @@ private struct ExperimentalPane: View {
                         on: model.bind({ Settings.useScaledWindows }, { Settings.useScaledWindows = $0 })) {
                     Toggle(isOn: model.bind({ Settings.scaledClickZooms }, { Settings.scaledClickZooms = $0 })) {
                         RowLabel(title: "Single click zooms in",
-                                 subtitle: "Double-click to focus in place.")
+                                 subtitle: "A click brings the window to the middle and focuses it. ⌘-click to focus in place.")
                     }
                     Toggle(isOn: model.bind({ Settings.scaledHoverFocus }, { Settings.scaledHoverFocus = $0 })) {
                         RowLabel(title: "Focus follows the pointer",
@@ -2012,7 +2051,7 @@ private struct DesktopMapRow: View {
     @State private var draggingFiles: DesktopPlacement?
     @State private var draggingWidgets: DesktopPlacement?
 
-    private let refresh = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @Environment(\.picturesPaused) private var paused
     private static let size = CGSize(width: 320, height: 192)
 
     var body: some View {
@@ -2029,8 +2068,14 @@ private struct DesktopMapRow: View {
                 .disabled(Settings.widgetsPlacement == .widgetsDefault && Settings.desktopFilesPlacement == .filesDefault)
             }
         }
-        .onAppear(perform: readCanvas)
-        .onReceive(refresh) { _ in readCanvas() }
+        // Once a second while the pane can be seen, and not at all while it can't: a timer left running
+        // behind a hidden window wakes the app for nothing.
+        .task(id: paused) {
+            while !paused, !Task.isCancelled {
+                readCanvas()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
     }
 
     private func readCanvas() {

@@ -157,6 +157,19 @@ final class LiveWindowsWireTests: XCTestCase {
         XCTAssertFalse(CanvasController.parks(wasParked: true, rect: farOff, target: inView, view: view))
     }
 
+    /// A window parked or woken leaves the set as it was, so it is no reason for a full frame: the
+    /// partial frames move it or leave it. A changed set or order, a request, and the first frame are.
+    func testOnlyAChangedSetOrARequestMakesAFrameFull() {
+        let ids: [CGWindowID] = [3, 1, 2]
+        XCTAssertFalse(CanvasController.frameIsFull(flagged: true, asked: false, first: false, windows: ids, asserted: ids))
+        XCTAssertTrue(CanvasController.frameIsFull(flagged: true, asked: true, first: false, windows: ids, asserted: ids))
+        XCTAssertTrue(CanvasController.frameIsFull(flagged: true, asked: false, first: true, windows: ids, asserted: ids))
+        XCTAssertTrue(CanvasController.frameIsFull(flagged: true, asked: false, first: false, windows: [3, 1], asserted: ids))
+        XCTAssertTrue(CanvasController.frameIsFull(flagged: true, asked: false, first: false, windows: [1, 3, 2], asserted: ids))
+        // An add-on from before sunlight-8 knows only full frames.
+        XCTAssertTrue(CanvasController.frameIsFull(flagged: false, asked: false, first: false, windows: ids, asserted: ids))
+    }
+
     func testMissingSocketIsUnavailable() {
         XCTAssertFalse(LiveWindowsConnection.probe(path: "/tmp/sunbeam-absent-\(UUID().uuidString).socket"))
     }

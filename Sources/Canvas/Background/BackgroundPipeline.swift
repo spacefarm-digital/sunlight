@@ -1,6 +1,7 @@
 import AppKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import IOSurface
 import ImageIO
 import Metal
 import UniformTypeIdentifiers
@@ -12,9 +13,52 @@ final class BackgroundPipeline: @unchecked Sendable {
     /// The blur levels, as Gaussian sigmas in display pixels. Level 0 is the picture itself; the picture
     /// shown is a cross-fade between the two levels around `BackgroundSpec.blurPosition`.
     nonisolated static let levelRadii: [CGFloat] = [0, 4, 12, 28, 60]
-    /// Blurred levels are rendered this much smaller: a blur hides the missing pixels, and it quarters the
-    /// memory and the time.
+    /// Blurred levels are rendered at most this much smaller: a blur hides the missing pixels, and it
+    /// quarters the memory and the time.
     nonisolated static let blurredScale: CGFloat = 0.5
+    /// How many pixels of a blurred level one sigma of its blur covers, at least. The lightest level has
+    /// two at `blurredScale` and shows nothing of it; the heavier ones are kept at twice that, which is
+    /// all a blur that wide can hold, drawn back up to the screen's size by the layer.
+    nonisolated static let pixelsPerSigma: CGFloat = 4
+
+    /// The size a level blurred by `sigma` display pixels is rendered at, as a part of the picture's:
+    /// `blurredScale` for the lightest, smaller the wider the blur. Each level is held twice while it
+    /// shows (the picture made here, and Core Animation's copy for the window server), and at half size
+    /// every one of them was 6 MB on a 3024 × 1964 screen, however little detail the blur left in it.
+    nonisolated static func scale(forSigma sigma: CGFloat) -> CGFloat {
+        guard sigma > 0 else { return 1 }
+        return min(blurredScale, pixelsPerSigma / sigma)
+    }
+
+    /// A picture ready for a layer: its pixels in a surface the window server shows as it is.
+    ///
+    /// An image given to a layer is held twice for as long as it shows: the image itself, and the copy
+    /// Core Animation makes in shared memory for the window server (measured: 22.7 MB each for a
+    /// 3024 × 1964 picture, and the window server's own texture on top). A surface is one buffer that
+    /// all three use. `image` stands in only where no surface could be made, or with surfaces switched
+    /// off (`usesSurfaces`).
+    struct Picture: @unchecked Sendable {
+        let surface: IOSurfaceRef?
+        let image: CGImage?
+        let width: Int
+        let height: Int
+
+        /// What goes in a layer's `contents`.
+        var contents: Any? {
+            if let surface { return surface }
+            return image
+        }
+    }
+
+    /// Whether pictures go to the layers as surfaces. On unless
+    /// `defaults write com.spacefarm.sunlight BackgroundSurfaces -bool NO` says otherwise: the way back
+    /// to plain images, should a Mac ever show a surface wrongly. Read as each picture is made.
+    nonisolated static var usesSurfaces: Bool {
+        UserDefaults.standard.object(forKey: "BackgroundSurfaces") as? Bool ?? true
+    }
+
+    /// 'BGRA': 8 bits a channel, the layout the window server composites without converting.
+    private nonisolated static let surfaceFormat: UInt32 = 0x4247_5241
 
     let queue = DispatchQueue(label: "com.spacefarm.canvas.background", qos: .userInitiated)
     private let context: CIContext
@@ -136,14 +180,26 @@ final class BackgroundPipeline: @unchecked Sendable {
         return render(ci, size: CGSize(width: image.width, height: image.height))
     }
 
-    /// The picture blurred by `sigma` display pixels, rendered at `blurredScale` of its size. The edges are
-    /// clamped first so the blur doesn't darken towards them.
-    func blurred(_ image: CGImage, sigma: CGFloat) -> CGImage? {
-        let s = BackgroundPipeline.blurredScale
-        let size = CGSize(width: (CGFloat(image.width) * s).rounded(), height: (CGFloat(image.height) * s).rounded())
-        var ci = CIImage(cgImage: image).transformed(by: CGAffineTransform(scaleX: s, y: s))
-        ci = ci.clampedToExtent().applyingGaussianBlur(sigma: sigma * s)
-        return render(ci.cropped(to: CGRect(origin: .zero, size: size)), size: size)
+    /// `image` as a picture for a layer: copied into a surface, after which the image itself can go.
+    func picture(_ image: CGImage) -> Picture {
+        let size = CGSize(width: image.width, height: image.height)
+        if BackgroundPipeline.usesSurfaces, let made = picture(CIImage(cgImage: image), size: size), made.surface != nil { return made }
+        return Picture(surface: nil, image: image, width: image.width, height: image.height)
+    }
+
+    /// The picture blurred by `sigma` display pixels, rendered at `scale(forSigma:)` of its size. The edges
+    /// are clamped first so the blur doesn't darken towards them.
+    func blurred(_ picture: Picture, sigma: CGFloat) -> Picture? {
+        guard let source = image(of: picture) else { return nil }
+        let s = BackgroundPipeline.scale(forSigma: sigma)
+        let size = CGSize(width: max(1, (CGFloat(picture.width) * s).rounded()), height: max(1, (CGFloat(picture.height) * s).rounded()))
+        // Blurred at `blurredScale`, as it always was, and made smaller only then: scaled down first, a
+        // sharp picture loses detail between the pixels it keeps, and the blur would spread that noise.
+        let half = BackgroundPipeline.blurredScale
+        var ci = source.transformed(by: CGAffineTransform(scaleX: half, y: half))
+        ci = ci.clampedToExtent().applyingGaussianBlur(sigma: sigma * half)
+        if s < half { ci = ci.transformed(by: CGAffineTransform(scaleX: s / half, y: s / half)) }
+        return self.picture(ci.cropped(to: CGRect(origin: .zero, size: size)), size: size)
     }
 
     /// The picture's mean colour and its relative luminance, 0–1.
@@ -171,7 +227,7 @@ final class BackgroundPipeline: @unchecked Sendable {
     }
 
     /// Grey noise the size of the screen, for the grain layer (soft-light blended at a few percent).
-    func grain(pixelSize: CGSize) -> CGImage? {
+    func grain(pixelSize: CGSize) -> Picture? {
         let s = BackgroundPipeline.blurredScale
         let size = CGSize(width: (pixelSize.width * s).rounded(), height: (pixelSize.height * s).rounded())
         guard let noise = CIFilter.randomGenerator().outputImage else { return nil }
@@ -183,7 +239,7 @@ final class BackgroundPipeline: @unchecked Sendable {
         grey.bVector = third
         grey.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
         guard let out = grey.outputImage else { return nil }
-        return render(out, size: size)
+        return picture(out, size: size)
     }
 
     /// A small picture in every style, for the Style row of the settings.
@@ -210,6 +266,42 @@ final class BackgroundPipeline: @unchecked Sendable {
         out = out.cropped(to: crop)
         return out.transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
     }
+
+    /// `image` rendered for a layer: straight into a surface, or as an image where that can't be had.
+    private func picture(_ image: CIImage, size: CGSize) -> Picture? {
+        let width = Int(size.width.rounded()), height = Int(size.height.rounded())
+        guard width > 0, height > 0 else { return nil }
+        if BackgroundPipeline.usesSurfaces, let surface = makeSurface(width: width, height: height) {
+            context.render(image, to: surface, bounds: CGRect(x: 0, y: 0, width: width, height: height), colorSpace: colorSpace)
+            return Picture(surface: surface, image: nil, width: width, height: height)
+        }
+        guard let made = render(image, size: size) else { return nil }
+        return Picture(surface: nil, image: made, width: made.width, height: made.height)
+    }
+
+    /// A picture as Core Image reads it, whichever way it is held.
+    private func image(of picture: Picture) -> CIImage? {
+        if let surface = picture.surface { return CIImage(ioSurface: surface, options: [.colorSpace: colorSpace]) }
+        return picture.image.map { CIImage(cgImage: $0) }
+    }
+
+    /// A surface of that many pixels, marked sRGB as the images are: unmarked, the window server takes a
+    /// surface's numbers for the display's own colours, and a picture comes out too vivid on a wide-gamut screen.
+    private func makeSurface(width: Int, height: Int) -> IOSurfaceRef? {
+        let properties: [CFString: Any] = [
+            kIOSurfaceWidth: width,
+            kIOSurfaceHeight: height,
+            kIOSurfaceBytesPerElement: 4,
+            kIOSurfacePixelFormat: BackgroundPipeline.surfaceFormat,
+        ]
+        guard let surface = IOSurfaceCreate(properties as CFDictionary) else { return nil }
+        guard let space = colorSpace.copyPropertyList() else { return nil }
+        IOSurfaceSetValue(surface, BackgroundPipeline.surfaceColorSpaceKey, space)
+        return surface
+    }
+
+    /// The key a surface's colour space goes under (`kIOSurfaceColorSpace`).
+    nonisolated static let surfaceColorSpaceKey = "IOSurfaceColorSpace" as CFString
 
     private func render(_ image: CIImage, size: CGSize) -> CGImage? {
         let rect = CGRect(origin: .zero, size: CGSize(width: size.width.rounded(), height: size.height.rounded()))
