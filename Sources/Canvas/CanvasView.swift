@@ -420,6 +420,8 @@ final class CanvasView: NSView {
         var veil: CAShapeLayer?
         /// A close: what to do once the window is gone from sight.
         var completion: (() -> Void)?
+        /// Not begun before this: the Dock takes the real window out of sight first (`holdEntrance`).
+        var waitsUntil: CFTimeInterval = 0
     }
     private var entrances: [Entrance] = []
     /// Closed windows held gone (their last frame) until the listing drops them, or the close is undone.
@@ -1564,6 +1566,20 @@ final class CanvasView: NSView {
         onEntranceChanged?()
     }
 
+    /// A window's opening begins again from its first frame at `until`, and holds there till then: the
+    /// real window is out of sight meanwhile, so none of the effect's motion is spent where nobody sees it
+    /// (Dealt's slide, nearly over by then, showed as a jump the moment the window came into sight).
+    func holdEntrance(of proxy: WindowProxy, until: CFTimeInterval) {
+        guard let i = entrances.firstIndex(where: { $0.proxy === proxy && $0.opening }) else { return }
+        entrances[i].start = nil
+        entrances[i].waitsUntil = until
+    }
+
+    /// Whether a window's close has played out and it is held gone, waiting for its app to close it.
+    func isHeldClosed(_ proxy: WindowProxy) -> Bool {
+        held.contains { $0.proxy === proxy }
+    }
+
     /// Whether a window is playing its close, or held gone after it.
     func isClosing(_ proxy: WindowProxy) -> Bool {
         held.contains { $0.proxy === proxy } || entrances.contains { $0.proxy === proxy && !$0.opening }
@@ -1654,7 +1670,7 @@ final class CanvasView: NSView {
     private func advance(_ e: inout Entrance, at now: CFTimeInterval, moving: Set<ObjectIdentifier> = []) -> Bool {
         // Not before there is something to show: a capture proxy's grey placeholder shouldn't pop and
         // then have the texture land mid-spring. An unstreamable window shows the placeholder after all.
-        if e.start == nil, e.proxy.hasFrame || e.proxy.usesRealWindow || now - e.added > 1.5 {
+        if e.start == nil, now >= e.waitsUntil, e.proxy.hasFrame || e.proxy.usesRealWindow || now - e.added > 1.5 {
             e.start = now
         }
         let geometry = geometry(of: e)

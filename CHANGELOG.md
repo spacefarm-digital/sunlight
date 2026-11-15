@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Clicking an app in the Dock that had no window on the canvas no longer empties the canvas for a moment before its new window opens.
+- New windows fade in without a full-strength flash first, and slide in from beside their neighbour from the start instead of jumping into place.
+- Closing a window no longer flashes it back for a frame as it goes.
+
 ## 0.3
 
 The performance release. Measured against 0.1 on the same Mac, on battery, ten minutes of everyday use each:

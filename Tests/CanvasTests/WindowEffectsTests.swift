@@ -101,4 +101,16 @@ final class WindowEffectsTests: XCTestCase {
         XCTAssertGreaterThan(closing.offset.dy, 0)              // and sinks as it goes
         XCTAssertGreaterThan(closing.dim, 0)
     }
+
+    /// A window taken by the Dock in mid-fade goes out of sight for its first frames, until its alpha has
+    /// landed, and so does one whose close has played out; nothing does where the add-on takes no alpha.
+    func testAWindowFadingInIsTakenOutOfSightUntilItsAlphaLands() {
+        let soon = CanvasController.revealAfter / 2, later = CanvasController.revealAfter * 2
+        XCTAssertTrue(CanvasController.takenOutOfSight(fades: true, opacity: 0.1, takenFor: nil, closedAndHeld: false))
+        XCTAssertTrue(CanvasController.takenOutOfSight(fades: true, opacity: 0.1, takenFor: soon, closedAndHeld: false))
+        XCTAssertFalse(CanvasController.takenOutOfSight(fades: true, opacity: 0.1, takenFor: later, closedAndHeld: false))
+        XCTAssertFalse(CanvasController.takenOutOfSight(fades: true, opacity: 1, takenFor: nil, closedAndHeld: false))
+        XCTAssertTrue(CanvasController.takenOutOfSight(fades: true, opacity: 0, takenFor: later, closedAndHeld: true))
+        XCTAssertFalse(CanvasController.takenOutOfSight(fades: false, opacity: 0.1, takenFor: nil, closedAndHeld: true))
+    }
 }

@@ -136,4 +136,14 @@ final class NewWindowSpotTests: XCTestCase {
         let wide = CGRect(x: 1000, y: 0, width: 800, height: 300)
         XCTAssertEqual(NewWindowSpot.neighbour(of: between, among: [wide, a], gap: 8), 1)
     }
+
+    /// An app brought forward over the canvas with no window on it (a Dock click on a running app whose
+    /// windows are all closed) is held for as a launch at once, before its focused window is read: handing
+    /// the windows back first emptied the canvas for a few frames. Not an app with a window somewhere on
+    /// a canvas, nor one already known to open none.
+    func testAnAppWithNoWindowOnTheCanvasIsHeldForAsALaunch() {
+        XCTAssertTrue(CanvasController.opensAsLaunch(hasWindows: false, knownWindowless: false))
+        XCTAssertFalse(CanvasController.opensAsLaunch(hasWindows: true, knownWindowless: false))
+        XCTAssertFalse(CanvasController.opensAsLaunch(hasWindows: false, knownWindowless: true))
+    }
 }

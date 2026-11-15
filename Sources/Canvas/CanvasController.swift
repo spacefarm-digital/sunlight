@@ -876,6 +876,7 @@ final class CanvasController {
         realWindowListReady = false
         lastFrame = nil
         parked.removeAll()
+        takenAt.removeAll()
         lastFullIDs = []
         baseParked = []
         fullFrameNeeded = true
@@ -918,7 +919,20 @@ final class CanvasController {
         if Date() < quietAfterCloseUntil || !app.isFinishedLaunching { return true }
         if let launch = launches[pid], Date() < launch.deadline { return true }
         if let restoring, let id = app.bundleIdentifier, restoring.apps.contains(id) { return true }
-        return false
+        // A running app with no window on any canvas, brought forward from its Dock icon: what it opens
+        // is a launch that stays on the canvas (`keepOnCanvas`), but that was only known once its focused
+        // window had been read, by which time the windows had been handed back: every window left the
+        // canvas for the frames in between, showing the wallpaper, with the app's new window full-size
+        // in the gap.
+        return CanvasController.opensAsLaunch(hasWindows: deskCanvases.contains { $0.hasWindows(of: pid) },
+                                              knownWindowless: windowlessApps.contains(pid))
+    }
+
+    /// Whether an app coming forward over the canvas is taken for a launch before its focused window is
+    /// read: it has no window on any canvas, in view or away, and hasn't shown already that it opens
+    /// none (`windowlessApps`: holding the canvas for it would only take the front back from it).
+    nonisolated static func opensAsLaunch(hasWindows: Bool, knownWindowless: Bool) -> Bool {
+        !hasWindows && !knownWindowless
     }
 
     /// The canvas keeps its windows while such an app is in front for a moment: handing them back put
@@ -1019,6 +1033,29 @@ final class CanvasController {
         let zone = CGRect(origin: .zero, size: view).insetBy(dx: -view.width * margin, dy: -view.height * margin)
         return !(rect.intersects(zone) || target?.intersects(zone) == true)
     }
+
+    /// When each window was first in a frame of this presentation (`takenOutOfSight`).
+    private var takenAt: [CGWindowID: CFTimeInterval] = [:]
+
+    /// Whether a window goes in the frame far out of sight rather than at its place. The add-on sets a
+    /// window's alpha (sunlight-40) only once it has taken it, in a request after the frame, so a window
+    /// taken in mid-fade (one opening) showed at full strength for the frame before its alpha landed:
+    /// it is taken out of sight first, for `revealAfter`, and comes to its place already faint. And a
+    /// window whose close has played out, held gone until it is: an app that hides its window rather
+    /// than closing it (Music, Calendar) fades it out with its own alpha, from full, which showed it
+    /// again for a frame or two right as it went. `takenFor`: how long since the window was first in a
+    /// frame of this presentation, nil for this frame. Only where the add-on takes alpha (`fades`).
+    nonisolated static func takenOutOfSight(fades: Bool, opacity: Float, takenFor: CFTimeInterval?, closedAndHeld: Bool) -> Bool {
+        guard fades else { return false }
+        if closedAndHeld { return true }
+        return opacity < 1 && (takenFor ?? 0) < revealAfter
+    }
+
+    /// How long a window taken in mid-fade stays out of sight: a few of the Dock's round trips, for the
+    /// alpha request behind the frame that took it to have landed.
+    nonisolated static let revealAfter: CFTimeInterval = 0.06
+    /// How far to the right of the view a window out of sight is put, in screens.
+    nonisolated static let outOfSightScreens: CGFloat = 4
 
     /// Whether a frame has to be a full one: an add-on that knows no other kind (`flagged` false), one
     /// asked for, the first of a presentation, or a set of windows, bottom to top, that isn't the one
@@ -1124,9 +1161,27 @@ final class CanvasController {
             }
             candidates = keep.map { candidates[$0] }
         }
+        let now = CACurrentMediaTime()
+        let fades = additionNumber >= 40
+        takenAt = takenAt.filter { id, _ in candidates.contains { $0.windowID == id } }
         for p in candidates {
             let id = p.windowID
             ids.append(id)
+            let taken = takenAt[id]
+            if taken == nil { takenAt[id] = now }
+            let heldClosed = view.isHeldClosed(p)
+            if CanvasController.takenOutOfSight(fades: fades, opacity: p.effect.opacity,
+                                                takenFor: taken.map { now - $0 }, closedAndHeld: heldClosed) {
+                // Its opening starts over as it comes into sight, not before.
+                if taken == nil, !heldClosed { view.holdEntrance(of: p, until: now + CanvasController.revealAfter) }
+                // Out of sight for now (see `takenOutOfSight`): far to the right of the view, at its scale.
+                let away = p.worldRect.offsetBy(dx: CanvasController.outOfSightScreens * size.width / camera.zoom, dy: 0)
+                let window = LiveWindowsWire.Window(id: id, worldRect: away, inset: p.inset, camera: wire, effect: p.effect)
+                parked[id] = nil
+                all.append(window)
+                near.append(window)
+                continue
+            }
             if flagged, p !== handoffTarget, p.pip == nil {   // a tile is on the screen whatever the camera does
                 let r = camera.toScreen(p.worldRect)
                 let rt = target.map { $0.toScreen(p.worldRect) }
@@ -2951,7 +3006,10 @@ final class CanvasController {
         view.dropHover(of: p)
         if p.pip != nil { endPip(p) }   // the close plays at its home
         view.beginExit(p, context: WindowEffect.Context(attached: p.attachedTo != nil)) { [weak self] in
-            self?.pressClose(p)
+            // The frame that takes the window out of sight (`takenOutOfSight`) went with the effect's end;
+            // the press waits for it to land, so an app that fades its window out itself does it there.
+            let delay = self?.renderer == .realWindows ? CanvasController.revealAfter : 0
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.pressClose(p) }
         }
         // Still here well after the press: the app kept it, with a sheet or none.
         // Unless the app no longer names it: closed, though the window server still has it (Music's last
@@ -6751,7 +6809,6 @@ final class CanvasController {
             }
             return
         }
-        stepDownForForeignApp()
         // From the canvas, a window taken out of the Dock (its tile clicked, the app's icon) goes back to
         // its place on the canvas, as on any Mac it goes back where it was: the canvas comes straight
         // back, the listing finds the window on screen and puts its proxy back, and the frame scales it
@@ -6777,6 +6834,10 @@ final class CanvasController {
             keepOnCanvas(app)
             return
         }
+        // Only now are the windows handed back: the two above bring the canvas straight back, and handing
+        // them back first (as this once did, before either) emptied the canvas for the frames until it
+        // was in front again: the wallpaper alone, with the launched app's new window full-size on it.
+        stepDownForForeignApp()
         // From inside a window, an app launching, with no window yet and none on the canvas (one that does
         // have some may just be slow to say which is focused): a window is on its way, and goes beside this
         // one. A running app with no window is just brought forward: it's used from its menus (⌘O) as it is.
