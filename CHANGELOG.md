@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- Sunlight's own windows, like Software Update when you check for updates, now open above the canvas where you can see and use them, instead of hidden behind it.
+
 ## 0.3.1
 
 - Clicking an app in the Dock that had no window on the canvas no longer empties the canvas for a moment before its new window opens.

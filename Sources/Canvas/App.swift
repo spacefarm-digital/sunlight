@@ -123,6 +123,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DispatchQueue.global(qos: .utility).async { CrashReports.collect() }
         DispatchQueue.main.asyncAfter(deadline: .now() + Stability.settleTime) { MainActor.assumeIsolated { Stability.settle() } }
         AXWindow.installGlobalTimeout(1)
+        // Before the updater: its Software Update window is one of the windows this keeps above the canvas.
+        OwnWindows.start()
         updater = Updater()
         updater?.onFoundUpdate = { [weak self] version in self?.menuBar?.model.updateVersion = version }
         installMenu()
