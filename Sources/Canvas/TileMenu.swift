@@ -8,7 +8,8 @@ import Carbon.HIToolbox
 /// order, so the set is the same wherever you look.
 @MainActor
 enum TileMenu {
-    struct Shortcut {
+    /// One placement command's untouched default key, as the tests and the explainer read them.
+    struct PlacementKey {
         let preset: Tiling.Preset
         let keyCode: Int
         /// The same key as a menu key equivalent, so the menus show it.
@@ -18,25 +19,21 @@ enum TileMenu {
     static let modifiers: NSEvent.ModifierFlags = [.control, .option]
     static let carbonModifiers = UInt32(controlKey | optionKey)
 
+    /// The key equivalents a menu item shows, from Settings › Shortcuts. A command with no key (or a
+    /// rebound one) gets exactly that; nothing here is hard-wired any more.
+    static func apply(_ shortcut: Shortcut?, to item: NSMenuItem) {
+        item.keyEquivalent = shortcut?.key ?? ""
+        item.keyEquivalentModifierMask = shortcut?.cocoaModifiers ?? []
+    }
+
     private static func arrow(_ code: Int) -> String { String(UnicodeScalar(UInt16(code)).map(Character.init) ?? " ") }
 
-    static let shortcuts: [Shortcut] = [
-        Shortcut(preset: .leftHalf, keyCode: kVK_LeftArrow, key: arrow(NSLeftArrowFunctionKey)),
-        Shortcut(preset: .rightHalf, keyCode: kVK_RightArrow, key: arrow(NSRightArrowFunctionKey)),
-        Shortcut(preset: .topHalf, keyCode: kVK_UpArrow, key: arrow(NSUpArrowFunctionKey)),
-        Shortcut(preset: .bottomHalf, keyCode: kVK_DownArrow, key: arrow(NSDownArrowFunctionKey)),
-        Shortcut(preset: .topLeft, keyCode: kVK_ANSI_U, key: "u"),
-        Shortcut(preset: .topRight, keyCode: kVK_ANSI_I, key: "i"),
-        Shortcut(preset: .bottomLeft, keyCode: kVK_ANSI_J, key: "j"),
-        Shortcut(preset: .bottomRight, keyCode: kVK_ANSI_K, key: "k"),
-        Shortcut(preset: .leftThird, keyCode: kVK_ANSI_D, key: "d"),
-        Shortcut(preset: .centerThird, keyCode: kVK_ANSI_F, key: "f"),
-        Shortcut(preset: .rightThird, keyCode: kVK_ANSI_G, key: "g"),
-        Shortcut(preset: .leftTwoThirds, keyCode: kVK_ANSI_E, key: "e"),
-        Shortcut(preset: .rightTwoThirds, keyCode: kVK_ANSI_T, key: "t"),
-        Shortcut(preset: .full, keyCode: kVK_Return, key: "\r"),
-        Shortcut(preset: .center, keyCode: kVK_ANSI_C, key: "c"),
-    ]
+    /// The defaults, for the tests and for anything that needs the untouched set. The menus read
+    /// `Bindings`, so a key changed in Settings shows changed everywhere.
+    static let shortcuts: [PlacementKey] = Command.tiles.compactMap { command in
+        guard let preset = command.preset, let shortcut = command.defaultShortcut else { return nil }
+        return PlacementKey(preset: preset, keyCode: Int(shortcut.keyCode), key: shortcut.key)
+    }
 
     /// Arrange: the windows of one screen in columns (⌃⌥ with the digit) or a grid.
     struct Arrangement {
@@ -71,10 +68,16 @@ enum TileMenu {
     static let pipKeyCode = kVK_ANSI_P
     static let pipKey = "p"
 
-    /// The keys as the explainer and the shortcuts menu show them.
-    static let tileKeysSummary = "⌃⌥ ← → ↑ ↓ · U I J K · D F G · E T · ⏎ C"
-    static let arrangeKeysSummary = "⌃⌥ " + arrangements.filter { $0.keyCode != nil }.map(\.key).joined(separator: " · ")
-    static let tidyKeysSummary = "⌃⌥" + tidyKey.uppercased()
+    /// The keys as the explainer and the shortcuts menu show them, as Settings › Shortcuts has them now.
+    static var tileKeysSummary: String {
+        Bindings.summary(Command.tiles, default: "⌃⌥ ← → ↑ ↓ · U I J K · D F G · E T · ⏎ C")
+    }
+    static var arrangeKeysSummary: String {
+        Bindings.summary([.arrange2, .arrange3, .arrange4], default: "⌃⌥ 2 · 3 · 4")
+    }
+    static var tidyKeysSummary: String {
+        Bindings.summary([.tidy], default: "⌃⌥A")
+    }
 
     private static let sections: [[Tiling.Preset]] = [
         [.leftHalf, .rightHalf, .topHalf, .bottomHalf],
@@ -99,8 +102,8 @@ enum TileMenu {
                                arranging: Bool? = nil) -> [NSMenuItem] {
         var items: [NSMenuItem] = []
         if arranging ?? Settings.arranging {
-            let tidy = NSMenuItem(title: "Tidy", action: actions.tidy, keyEquivalent: tidyKey)
-            tidy.keyEquivalentModifierMask = modifiers
+            let tidy = NSMenuItem(title: "Tidy", action: actions.tidy, keyEquivalent: "")
+            apply(Bindings.shortcut(for: .tidy), to: tidy)
             tidy.target = target
             let tidyBy = NSMenuItem(title: "Tidy By", action: nil, keyEquivalent: "")
             tidyBy.submenu = tidyByMenu(target: target, action: actions.tidyBy)
@@ -123,9 +126,8 @@ enum TileMenu {
         for (i, section) in sections.enumerated() {
             if i > 0 { menu.addItem(.separator()) }
             for preset in section {
-                let shortcut = shortcuts.first { $0.preset == preset }
-                let item = NSMenuItem(title: preset.title, action: action, keyEquivalent: shortcut?.key ?? "")
-                item.keyEquivalentModifierMask = modifiers
+                let item = NSMenuItem(title: preset.title, action: action, keyEquivalent: "")
+                if let command = Command.tile(preset) { apply(Bindings.shortcut(for: command), to: item) }
                 item.target = target
                 item.representedObject = represent(preset)
                 item.image = picture(of: preset)
@@ -140,8 +142,14 @@ enum TileMenu {
         let menu = NSMenu(title: "Arrange")
         for (i, a) in arrangements.enumerated() {
             if i > 0, a.rows > 1, arrangements[i - 1].rows == 1 { menu.addItem(.separator()) }
-            let item = NSMenuItem(title: a.title, action: action, keyEquivalent: a.key)
-            item.keyEquivalentModifierMask = a.key.isEmpty ? [] : modifiers
+            let item = NSMenuItem(title: a.title, action: action, keyEquivalent: "")
+            let command: Command? = switch (a.columns, a.rows) {
+            case (2, 1): .arrange2
+            case (3, 1): .arrange3
+            case (4, 1): .arrange4
+            default: nil
+            }
+            if let command { apply(Bindings.shortcut(for: command), to: item) }
             item.target = target
             item.representedObject = [a.columns, a.rows]
             item.image = picture(Tiling.cells(columns: a.columns, rows: a.rows), litAll: true)

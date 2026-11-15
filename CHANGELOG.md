@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Configure shortcuts, trackpad gestures and camera sensitivity in Settings.
+- Optional release-time window centering, directional navigation and free four-finger steering.
+
 ## 0.3.1
 
 - Clicking an app in the Dock that had no window on the canvas no longer empties the canvas for a moment before its new window opens.
