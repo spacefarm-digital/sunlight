@@ -25,7 +25,10 @@ The add-on and its loader are Sunlight's own code in `osax/`, adapted from yabai
   Compared with the original, messages are length-checked before their fields are read, a vanished
   peer can't SIGPIPE the Dock, and a stalled one can't hold the listener.
 - `osax/loader.m`: injects the payload into the Dock. Built arm64e, as the Dock is, so it shares the
-  Dock's library addresses.
+  Dock's library addresses. `scripts/build-live-windows.sh` then pins the payload and the loader to PAC
+  ABI v0 (Mach-O caps `USR00`). The Dock on macOS 15 is v0, and Xcode 26 stamps arm64e executables as v1;
+  the kernel will not inject v1 into that Dock, so the loader exits 1. The two ABIs share an instruction
+  stream, and only the capability byte differs.
 - `osax/common.h`: opcodes, the 4096-byte buffer, the socket name (`/tmp/sunlight-live_<user>.socket`)
   and the add-on version, which the helper compares with what's installed.
 - `helper.m`: `SunlightLiveWindows`, the one program that runs as root, through sudo or as the launch
