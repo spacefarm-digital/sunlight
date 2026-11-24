@@ -1,4 +1,5 @@
 import AppKit
+import IOKit
 import os
 
 /// Four-finger drag pans the canvas from anywhere: on the canvas, over windows too (where a one-finger
@@ -18,6 +19,10 @@ import os
 /// Dock-control events. A session event tap (Accessibility, on its own thread like `KeyTap`) drops those
 /// while four fingers are down, so the drag pans and does nothing else. That takes the four-finger pinch
 /// (Launchpad) with it; five fingers are left alone.
+///
+/// MultitouchSupport lists the devices attached when asked and never adds one later, so a Magic Trackpad
+/// that pairs or reconnects after launch (or after waking) would go unheard. An IOKit notification on
+/// multitouch devices coming and going starts the list over each time.
 final class TrackpadPan: @unchecked Sendable {
     enum Phase: Sendable, Equatable {
         case began
@@ -74,6 +79,12 @@ final class TrackpadPan: @unchecked Sendable {
     private var deviceList: CFArray?
     private var wakeToken: NSObjectProtocol?
     private var settingToken: NSObjectProtocol?
+    /// Multitouch devices attaching and detaching (a Bluetooth trackpad connecting, say).
+    private var notifyPort: IONotificationPortRef?
+    private var attachIterator: io_iterator_t = 0
+    private var detachIterator: io_iterator_t = 0
+    /// The restart a device change has asked for; a burst of changes makes one.
+    private var pendingRestart: DispatchWorkItem?
 
     // Tap thread.
     private var thread: Thread?
@@ -98,8 +109,9 @@ final class TrackpadPan: @unchecked Sendable {
         wakeToken = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self?.restartDevices() }
+            self?.scheduleRestart()
         }
+        watchDevices()
 
         let t = Thread { [weak self] in self?.threadMain() }
         t.name = "canvas.trackpadpan"
@@ -156,6 +168,48 @@ final class TrackpadPan: @unchecked Sendable {
         let phases = state.withLock { $0.reset() }
         phases.forEach(send)
         startDevices()
+    }
+
+    /// Starts the devices over a second from now, once whatever attached has settled: MultitouchSupport
+    /// doesn't list a trackpad the moment IOKit sees it.
+    private func scheduleRestart() {
+        pendingRestart?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.restartDevices() }
+        pendingRestart = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
+    /// Listens for multitouch devices attaching and detaching, on the main queue.
+    private func watchDevices() {
+        guard mt != nil, let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        notifyPort = port
+        IONotificationPortSetDispatchQueue(port, .main)
+        let info = Unmanaged.passUnretained(self).toOpaque()
+        IOServiceAddMatchingNotification(port, kIOFirstMatchNotification, IOServiceMatching("AppleMultitouchDevice"),
+                                         TrackpadPan.deviceChanged, info, &attachIterator)
+        IOServiceAddMatchingNotification(port, kIOTerminatedNotification, IOServiceMatching("AppleMultitouchDevice"),
+                                         TrackpadPan.deviceChanged, info, &detachIterator)
+        // The iterators arm once drained. The attach one starts out holding the devices already
+        // attached, which `startDevices` has just followed.
+        _ = TrackpadPan.drain(attachIterator)
+        _ = TrackpadPan.drain(detachIterator)
+    }
+
+    private static let deviceChanged: IOServiceMatchingCallback = { info, iterator in
+        guard let info, drain(iterator) > 0 else { return }
+        let pan = Unmanaged<TrackpadPan>.fromOpaque(info).takeUnretainedValue()
+        Log.note("TrackpadPan: a multitouch device came or went, starting the devices over")
+        pan.scheduleRestart()
+    }
+
+    /// Releases every service in `iterator`, which re-arms its notification; returns how many there were.
+    private static func drain(_ iterator: io_iterator_t) -> Int {
+        var count = 0
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            IOObjectRelease(service)
+            count += 1
+        }
+        return count
     }
 
     private var devices: [MultitouchSupport.Device] {
